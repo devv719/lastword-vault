@@ -1,4 +1,5 @@
 from collections.abc import AsyncGenerator
+from unittest.mock import MagicMock
 import pytest
 import pytest_asyncio
 from httpx import ASGITransport, AsyncClient
@@ -40,6 +41,18 @@ async def setup_database():
     yield
     async with test_engine.begin() as conn:
         await conn.run_sync(Base.metadata.drop_all)
+
+
+@pytest.fixture(autouse=True)
+def mock_ses_by_default(monkeypatch):
+    """Ensure no real emails or AWS network calls are attempted during automated tests."""
+    mock_client = MagicMock()
+    mock_client.send_email.return_value = {
+        "MessageId": "ses-msg-mock-default",
+        "ResponseMetadata": {"HTTPStatusCode": 200},
+    }
+    monkeypatch.setattr("app.services.email_service.get_ses_client", lambda: mock_client)
+    return mock_client
 
 
 async def override_get_db() -> AsyncGenerator[AsyncSession, None]:

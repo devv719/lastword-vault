@@ -1,5 +1,5 @@
 import base64
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 import json
 import logging
 from typing import List, Optional
@@ -16,6 +16,7 @@ from app.models.contact import TrustedContact
 from app.models.user import User
 from app.models.vault import Vault
 from app.models.vault_item import VaultItem
+from app.models.vault_item_recipient import VaultItemRecipient
 from app.schemas.vault import (
     AssignContactRequest,
     VaultCreate,
@@ -27,6 +28,7 @@ from app.schemas.vault import (
     VaultUpdate,
 )
 from app.services.audit_service import record_audit_log
+from app.services.email_service import EmailDeliveryError, send_vault_release_notification_email
 from app.services.s3_service import (
     delete_encrypted_file,
     download_encrypted_file,
@@ -1219,3 +1221,229 @@ async def download_item_file_scoped(
     db: AsyncSession = Depends(get_db),
 ):
     return await _handle_file_download(item_id, request, current_user, db)
+
+
+# =========================================================================
+# VAULT RELEASE ENDPOINTS FOR TRUSTED CONTACTS
+# =========================================================================
+
+@router.get(
+    "/release/{download_token}",
+    summary="Public endpoint: Retrieve released item ciphertext by single-use token",
+)
+async def access_released_item(
+    download_token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Public access point for trusted contacts who received a release notification email.
+    Validates token expiration, fetches ciphertext from S3/Postgres, and streams to client.
+    """
+    query = (
+        select(VaultItemRecipient)
+        .options(
+            selectinload(VaultItemRecipient.vault_item),
+            selectinload(VaultItemRecipient.contact),
+        )
+        .where(VaultItemRecipient.download_token == download_token)
+    )
+    res = await db.execute(query)
+    recipient_rec = res.scalar_one_or_none()
+
+    if recipient_rec is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Release access token is invalid or has expired",
+        )
+
+    now = datetime.now(timezone.utc)
+    token_exp = recipient_rec.token_expires_at
+    if token_exp and token_exp.tzinfo is None:
+        token_exp = token_exp.replace(tzinfo=timezone.utc)
+
+    if token_exp and now > token_exp:
+        raise HTTPException(
+            status_code=status.HTTP_410_GONE,
+            detail="Release access token has expired",
+        )
+
+    item = recipient_rec.vault_item
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Associated vault item record no longer exists",
+        )
+
+    # Mark as accessed
+    recipient_rec.downloaded = True
+    db.add(recipient_rec)
+    await db.commit()
+
+    # If it's a file document, stream binary with cryptographic headers
+    if item.item_type == "document":
+        file_bytes = None
+        content_type = item.mime_type or "application/octet-stream"
+
+        if item.s3_key:
+            try:
+                file_bytes, s3_ct = download_encrypted_file(item.s3_key)
+                if s3_ct and not item.mime_type:
+                    content_type = s3_ct
+            except Exception as e:
+                logger.error(f"Failed to fetch released S3 file {item.s3_key}: {e}")
+
+        if file_bytes is None and item.encrypted_content:
+            raw = item.encrypted_content
+            if raw.startswith("{"):
+                try:
+                    parsed = json.loads(raw)
+                    cipher = parsed.get("ciphertext")
+                    if cipher:
+                        file_bytes = base64.b64decode(cipher)
+                except Exception:
+                    pass
+            if file_bytes is None:
+                file_bytes = raw.encode("utf-8")
+
+        if file_bytes is None:
+            raise HTTPException(
+                status_code=status.HTTP_404_NOT_FOUND,
+                detail="Encrypted asset file content is unavailable",
+            )
+
+        filename = item.original_filename or item.title or "released_asset.bin"
+        return Response(
+            content=file_bytes,
+            media_type="application/octet-stream",
+            headers={
+                "X-Encryption-IV": item.encryption_iv or "",
+                "X-Original-Filename": filename,
+                "Content-Disposition": f'attachment; filename="{filename}"',
+                "Access-Control-Expose-Headers": "X-Encryption-IV, X-Original-Filename, Content-Disposition",
+            },
+        )
+
+    # If note, return metadata and encrypted content payload
+    return {
+        "id": str(item.id),
+        "title": item.title,
+        "item_type": item.item_type,
+        "category": item.category,
+        "encrypted_title": item.encrypted_title,
+        "encrypted_note": item.encrypted_note or item.encrypted_content,
+        "encryption_iv": item.encryption_iv,
+        "original_filename": item.original_filename,
+        "released_at": recipient_rec.released_at,
+    }
+
+
+@router.post(
+    "/trigger-release",
+    summary="Owner endpoint: Trigger immediate vault release and dispatch notification emails",
+)
+async def trigger_vault_release(
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    """
+    Manually triggers vault release for testing or emergency manual activation.
+    Dispatches real release notification emails via Amazon SES to all assigned contacts.
+    """
+    now = datetime.now(timezone.utc)
+    token_expiry = now + timedelta(days=30)
+
+    # Fetch authorized items for this user
+    items_query = (
+        select(VaultItem)
+        .options(selectinload(VaultItem.assigned_contact))
+        .where(
+            VaultItem.user_id == current_user.id,
+            VaultItem.release_authorized == True,
+            VaultItem.assigned_contact_id.isnot(None),
+        )
+    )
+    items_res = await db.execute(items_query)
+    authorized_items = items_res.scalars().all()
+
+    if not authorized_items:
+        return {
+            "message": "No release-authorized items with assigned contacts found.",
+            "released_items_count": 0,
+            "dispatched_notifications": [],
+        }
+
+    notifications = []
+    import secrets
+
+    for item in authorized_items:
+        contact = item.assigned_contact
+        if not contact or not contact.email:
+            continue
+
+        download_token = secrets.token_urlsafe(32)
+
+        # Check existing recipient record
+        rec_q = select(VaultItemRecipient).where(
+            VaultItemRecipient.vault_item_id == item.id,
+            VaultItemRecipient.contact_id == contact.id,
+        )
+        rec_res = await db.execute(rec_q)
+        rec = rec_res.scalar_one_or_none()
+
+        if rec is None:
+            rec = VaultItemRecipient(
+                vault_item_id=item.id,
+                contact_id=contact.id,
+                download_token=download_token,
+                token_expires_at=token_expiry,
+                released_at=now,
+                downloaded=False,
+            )
+            db.add(rec)
+        else:
+            rec.download_token = download_token
+            rec.token_expires_at = token_expiry
+            rec.released_at = now
+
+        try:
+            res = send_vault_release_notification_email(
+                to_email=contact.email,
+                contact_name=contact.name,
+                owner_name=current_user.display_name or "Enclave Owner",
+                item_title=item.title,
+                download_token=download_token,
+                expires_at=token_expiry,
+            )
+            notifications.append({
+                "recipient": contact.email,
+                "item_title": item.title,
+                "status": "SENT",
+                "ses_result": res,
+            })
+        except EmailDeliveryError as exc:
+            notifications.append({
+                "recipient": contact.email,
+                "item_title": item.title,
+                "status": "FAILED",
+                "error": exc.message,
+            })
+
+    await record_audit_log(
+        session=db,
+        user_id=current_user.id,
+        event_type="VAULT",
+        action="MANUAL_VAULT_RELEASE_TRIGGERED",
+        description=f"Manual vault release triggered. {len(notifications)} emails dispatched.",
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    await db.commit()
+
+    return {
+        "message": f"Vault release triggered. {len(notifications)} notification(s) processed.",
+        "released_items_count": len(authorized_items),
+        "dispatched_notifications": notifications,
+    }

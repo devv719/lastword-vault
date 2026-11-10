@@ -17,6 +17,10 @@ from app.schemas.contact import (
     ContactVerifyRequest,
 )
 from app.services.audit_service import record_audit_log
+from app.services.email_service import (
+    EmailDeliveryError,
+    send_contact_verification_email,
+)
 
 router = APIRouter(prefix="/contacts", tags=["Trusted Contacts"])
 
@@ -48,12 +52,28 @@ async def create_contact(
     db.add(contact)
     await db.flush()
 
+    # Attempt Amazon SES verification email dispatch
+    try:
+        send_contact_verification_email(
+            to_email=contact.email,
+            contact_name=contact.name,
+            owner_name=current_user.display_name or "Enclave Owner",
+            verification_token=verification_token,
+            contact_id=str(contact.id),
+        )
+    except EmailDeliveryError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to dispatch verification email to {contact.email} via Amazon SES: {exc.message}",
+        )
+
     await record_audit_log(
         session=db,
         user_id=current_user.id,
         event_type="CONTACT",
         action="CONTACT_CREATED",
-        description=f"Added trusted contact: {contact.name} ({contact.email})",
+        description=f"Added trusted contact: {contact.name} ({contact.email}). Verification dispatched via SES.",
         ip_address=ip_address,
         user_agent=request.headers.get("user-agent"),
     )
@@ -258,5 +278,104 @@ async def verify_contact(
     await db.commit()
     await db.refresh(contact)
 
+    return ContactResponse.model_validate(contact)
+
+
+@router.post(
+    "/{contact_id}/resend",
+    response_model=ContactResponse,
+    summary="Resend verification email to trusted contact via Amazon SES",
+)
+async def resend_contact_verification(
+    contact_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(TrustedContact).where(
+        TrustedContact.id == contact_id,
+        TrustedContact.user_id == current_user.id,
+    )
+    result = await db.execute(query)
+    contact = result.scalar_one_or_none()
+
+    if contact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Contact not found",
+        )
+
+    # Regenerate token if not present
+    if not contact.verification_token:
+        contact.verification_token = secrets.token_urlsafe(32)
+
+    try:
+        send_contact_verification_email(
+            to_email=contact.email,
+            contact_name=contact.name,
+            owner_name=current_user.display_name or "Enclave Owner",
+            verification_token=contact.verification_token,
+            contact_id=str(contact.id),
+        )
+    except EmailDeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Failed to resend verification email via Amazon SES: {exc.message}",
+        )
+
+    contact.updated_at = datetime.now(timezone.utc)
+    db.add(contact)
+
+    await record_audit_log(
+        session=db,
+        user_id=current_user.id,
+        event_type="CONTACT",
+        action="CONTACT_VERIFICATION_RESENT",
+        description=f"Resent verification email to contact {contact.name} ({contact.email}) via SES",
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    await db.commit()
+    await db.refresh(contact)
+    return ContactResponse.model_validate(contact)
+
+
+@router.get(
+    "/verify-token/{token}",
+    response_model=ContactResponse,
+    summary="Public endpoint: Verify contact presence by token from email link",
+)
+async def verify_contact_by_token(
+    token: str,
+    request: Request,
+    db: AsyncSession = Depends(get_db),
+):
+    query = select(TrustedContact).where(TrustedContact.verification_token == token)
+    result = await db.execute(query)
+    contact = result.scalar_one_or_none()
+
+    if contact is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Invalid or expired verification token",
+        )
+
+    contact.verified = True
+    contact.updated_at = datetime.now(timezone.utc)
+    db.add(contact)
+
+    await record_audit_log(
+        session=db,
+        user_id=contact.user_id,
+        event_type="CONTACT",
+        action="CONTACT_VERIFIED_VIA_TOKEN",
+        description=f"Trusted contact {contact.name} confirmed status from verification link",
+        ip_address=get_client_ip(request),
+        user_agent=request.headers.get("user-agent"),
+    )
+
+    await db.commit()
+    await db.refresh(contact)
     return ContactResponse.model_validate(contact)
 

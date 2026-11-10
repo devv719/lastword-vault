@@ -93,8 +93,8 @@ export const ContactsPage: React.FC = () => {
       }
       setIsModalOpen(false);
       resetForm();
-    } catch {
-      toast.error('Failed to save contact.');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to save contact.');
     }
   };
 
@@ -105,17 +105,17 @@ export const ContactsPage: React.FC = () => {
       setContacts((contacts ?? []).filter((c) => c.id !== contactToDelete.id));
       toast.success('Contact removed from directory.');
       setContactToDelete(null);
-    } catch {
-      toast.error('Failed to remove contact.');
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to remove contact.');
     }
   };
 
   const handleResendVerification = async (contact: Contact) => {
     try {
       await vaultService.resendVerification(contact.id);
-      toast.success(`Verification challenge resent to ${contact.email}`);
-    } catch {
-      toast.error('Failed to resend verification.');
+      toast.success(`Verification challenge sent to ${contact.email} via Amazon SES`);
+    } catch (err: any) {
+      toast.error(err?.message || 'Failed to resend verification.');
     }
   };
 

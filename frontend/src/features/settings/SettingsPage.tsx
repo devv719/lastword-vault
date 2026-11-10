@@ -6,6 +6,8 @@ import {
   Bell,
   Shield,
   Save,
+  Mail,
+  Send,
 } from 'lucide-react';
 import { vaultService } from '../../services/vaultService';
 import { useAsync } from '../../hooks/useAsync';
@@ -90,6 +92,33 @@ export const SettingsPage: React.FC = () => {
       toast.error('Failed to save settings.');
     } finally {
       setIsSaving(false);
+    }
+  };
+
+  const [isSendingTestEmail, setIsSendingTestEmail] = useState(false);
+  const [isSendingReminder, setIsSendingReminder] = useState(false);
+
+  const handleSendTestEmail = async () => {
+    setIsSendingTestEmail(true);
+    try {
+      const res = await vaultService.sendTestEmail();
+      toast.success(res.message || 'Diagnostic email dispatched via Amazon SES.');
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err.message || 'SES delivery failed.');
+    } finally {
+      setIsSendingTestEmail(false);
+    }
+  };
+
+  const handleSendCheckinReminder = async () => {
+    setIsSendingReminder(true);
+    try {
+      const res = await vaultService.sendCheckinReminder();
+      toast.success(res.message || 'Check-in reminder email sent via Amazon SES.');
+    } catch (err: any) {
+      toast.error(err?.response?.data?.detail || err.message || 'Failed to dispatch check-in reminder.');
+    } finally {
+      setIsSendingReminder(false);
     }
   };
 
@@ -260,7 +289,46 @@ export const SettingsPage: React.FC = () => {
         </div>
       </div>
 
-      {/* ── 6. STICKY SAVE BAR WHEN FORM IS DIRTY ─────────────────── */}
+      {/* ── 6. AMAZON SES DIAGNOSTICS & DELIVERY TEST ─────────────── */}
+      <div className="bg-white border border-border rounded-[24px] p-6 sm:p-8 shadow-xs space-y-4">
+        <div>
+          <h2 className="text-base font-semibold text-navy tracking-tight flex items-center gap-2">
+            <Mail className="w-4 h-4 text-accent" />
+            Amazon SES Email Delivery
+          </h2>
+          <p className="text-xs text-muted-text mt-1">
+            Real AWS SES dispatch test in <code className="font-mono text-navy font-semibold">ap-south-1</code> via EC2 IAM role authentication.
+          </p>
+        </div>
+
+        <div className="p-4 rounded-2xl bg-surface border border-border text-xs text-navy leading-relaxed">
+          <p className="text-xs text-muted-text">
+            <strong>Sandbox Notice:</strong> If your SES account is in AWS Sandbox mode, emails can only be delivered to email addresses that have been verified in the AWS SES Console.
+          </p>
+          <div className="mt-4 flex flex-wrap gap-3">
+            <button
+              type="button"
+              onClick={handleSendTestEmail}
+              disabled={isSendingTestEmail}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-navy text-white text-xs font-medium hover:bg-navy/90 transition-colors disabled:opacity-50 cursor-pointer"
+            >
+              <Send className="w-3.5 h-3.5" />
+              <span>{isSendingTestEmail ? 'Dispatching Test Email...' : 'Send Test Email (SES)'}</span>
+            </button>
+            <button
+              type="button"
+              onClick={handleSendCheckinReminder}
+              disabled={isSendingReminder}
+              className="inline-flex items-center gap-1.5 px-4 py-2 rounded-full bg-surface-2 text-navy border border-border text-xs font-medium hover:bg-white transition-colors disabled:opacity-50 cursor-pointer"
+            >
+              <Clock className="w-3.5 h-3.5 text-accent" />
+              <span>{isSendingReminder ? 'Sending Reminder...' : 'Dispatch Check-In Reminder'}</span>
+            </button>
+          </div>
+        </div>
+      </div>
+
+      {/* ── 7. STICKY SAVE BAR WHEN FORM IS DIRTY ─────────────────── */}
       <AnimatePresence>
         {isDirty && (
           <motion.div

@@ -30,6 +30,20 @@ class Settings(BaseSettings):
     AWS_SECRET_ACCESS_KEY: str = ""
     S3_BUCKET_NAME: str = ""
     SNS_TOPIC_ARN: str = ""
+    SES_SENDER_EMAIL: str = "devvv0793@gmail.com"
+
+    # frontend / public url configuration
+    FRONTEND_URL: str = ""
+    DOMAIN: str = ""
+
+    @property
+    def effective_frontend_url(self) -> str:
+        """Derive the publicly reachable base URL for links in dispatched emails."""
+        if self.FRONTEND_URL:
+            return self.FRONTEND_URL.rstrip("/")
+        if self.DOMAIN:
+            return f"https://{self.DOMAIN.rstrip('/')}"
+        return "http://3.109.2.254"
 
     # ssm configuration
     USE_SSM: bool = False

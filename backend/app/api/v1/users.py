@@ -17,6 +17,7 @@ from app.schemas.user import (
     VerifyEmailRequest,
 )
 from app.services.audit_service import record_audit_log
+from app.services.email_service import EmailDeliveryError, send_verification_email
 
 router = APIRouter(prefix="/users", tags=["Users"])
 
@@ -127,12 +128,25 @@ async def request_email_change(
     current_user.email_verification_token = verification_token
     db.add(current_user)
 
+    # Attempt SES delivery before committing changes
+    try:
+        send_verification_email(
+            to_email=new_email,
+            verification_token=verification_token,
+        )
+    except EmailDeliveryError as exc:
+        await db.rollback()
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Verification email delivery failed via Amazon SES: {exc.message}",
+        )
+
     await record_audit_log(
         session=db,
         user_id=current_user.id,
         event_type="USER",
         action="EMAIL_CHANGE_REQUESTED",
-        description=f"Requested change to {new_email}",
+        description=f"Requested change to {new_email}. Verification email dispatched via SES.",
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
@@ -140,7 +154,7 @@ async def request_email_change(
     await db.commit()
 
     return ChangeEmailResponse(
-        message=f"Verification token generated for {new_email}. Confirm using the verify-email endpoint.",
+        message=f"Verification email dispatched via Amazon SES to {new_email}.",
         pending_email=new_email,
         verification_token=verification_token,
     )

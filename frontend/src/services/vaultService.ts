@@ -444,49 +444,92 @@ export const vaultService = {
   async createContact(
     contact: Omit<Contact, 'id' | 'status' | 'assignedItemsCount' | 'createdAt'>
   ): Promise<Contact> {
-    await delay(300);
-    const contacts = await this.getContacts();
-    const newContact: Contact = {
-      ...contact,
-      id: `cnt-${Date.now()}`,
-      status: 'pending',
-      assignedItemsCount: 0,
-      createdAt: new Date().toISOString(),
-    };
-    const updated = [...contacts, newContact];
-    localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(updated));
+    try {
+      const resp = await api.post('/contacts', {
+        name: contact.name,
+        email: contact.email,
+        relationship_type: contact.relationship,
+        phone: contact.phone || null,
+      });
+      const c = resp.data;
+      const newContact: Contact = {
+        id: c.id,
+        name: c.name,
+        email: c.email,
+        relationship: c.relationship_type || contact.relationship,
+        status: c.verified ? 'verified' : 'pending',
+        assignedItemsCount: 0,
+        phone: c.phone || undefined,
+        verifiedAt: c.verified_at || undefined,
+        createdAt: c.created_at,
+      };
+      const contacts = await this.getContacts();
+      localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify([...contacts, newContact]));
 
-    // Log activity
-    const activity: ActivityEvent = {
-      id: `act-${Date.now()}`,
-      type: 'contact_verification',
-      title: 'New Trusted Contact Added',
-      description: `Verification dispatched to ${contact.email} (${contact.name}).`,
-      timestamp: new Date().toISOString(),
-      ipAddress: '198.51.100.42',
-      device: 'Vault Console',
-      method: 'Contact Registry',
-    };
-    const currentActivities = await this.getActivityEvents();
-    localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify([activity, ...currentActivities]));
+      // Log activity
+      const activity: ActivityEvent = {
+        id: `act-${Date.now()}`,
+        type: 'contact_verification',
+        title: 'New Trusted Contact Added',
+        description: `Verification email dispatched via Amazon SES to ${contact.email} (${contact.name}).`,
+        timestamp: new Date().toISOString(),
+        ipAddress: '198.51.100.42',
+        device: 'Vault Console',
+        method: 'Amazon SES Dispatcher',
+      };
+      const currentActivities = await this.getActivityEvents();
+      localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify([activity, ...currentActivities]));
 
-    return newContact;
+      return newContact;
+    } catch (err: any) {
+      if (err?.response?.data?.detail) {
+        throw new Error(err.response.data.detail);
+      }
+      throw err;
+    }
   },
 
   async updateContact(id: string, updates: Partial<Contact>): Promise<Contact> {
-    await delay(250);
-    const contacts = await this.getContacts();
-    const idx = contacts.findIndex((c) => c.id === id);
-    if (idx === -1) throw new Error('Contact not found');
-
-    const updatedContact = { ...contacts[idx], ...updates };
-    contacts[idx] = updatedContact;
-    localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(contacts));
-    return updatedContact;
+    try {
+      const resp = await api.patch(`/contacts/${id}`, {
+        name: updates.name,
+        email: updates.email,
+        relationship_type: updates.relationship,
+        phone: updates.phone,
+      });
+      const c = resp.data;
+      const updatedContact: Contact = {
+        id: c.id,
+        name: c.name,
+        email: c.email,
+        relationship: c.relationship_type || updates.relationship || 'Trusted Contact',
+        status: c.verified ? 'verified' : 'pending',
+        assignedItemsCount: updates.assignedItemsCount || 0,
+        phone: c.phone || undefined,
+        verifiedAt: c.verified_at || undefined,
+        createdAt: c.created_at,
+      };
+      const contacts = await this.getContacts();
+      const idx = contacts.findIndex((c) => c.id === id);
+      if (idx !== -1) contacts[idx] = updatedContact;
+      localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(contacts));
+      return updatedContact;
+    } catch (err: any) {
+      if (err?.response?.data?.detail) {
+        throw new Error(err.response.data.detail);
+      }
+      throw err;
+    }
   },
 
   async deleteContact(id: string): Promise<void> {
-    await delay(250);
+    try {
+      await api.delete(`/contacts/${id}`);
+    } catch (err: any) {
+      if (err?.response?.status !== 404 && err?.response?.data?.detail) {
+        throw new Error(err.response.data.detail);
+      }
+    }
     const contacts = await this.getContacts();
     const filtered = contacts.filter((c) => c.id !== id);
     localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(filtered));
@@ -502,23 +545,36 @@ export const vaultService = {
   },
 
   async resendVerification(contactId: string): Promise<void> {
-    await delay(350);
-    const contacts = await this.getContacts();
-    const contact = contacts.find((c) => c.id === contactId);
-    if (!contact) throw new Error('Contact not found');
+    try {
+      await api.post(`/contacts/${contactId}/resend`);
+      const activity: ActivityEvent = {
+        id: `act-${Date.now()}`,
+        type: 'contact_verification',
+        title: 'Verification Link Dispatched',
+        description: `Cryptographic verification challenge resent via Amazon SES.`,
+        timestamp: new Date().toISOString(),
+        ipAddress: '198.51.100.42',
+        device: 'Vault Console',
+        method: 'Amazon SES Dispatcher',
+      };
+      const currentActivities = await this.getActivityEvents();
+      localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify([activity, ...currentActivities]));
+    } catch (err: any) {
+      if (err?.response?.data?.detail) {
+        throw new Error(err.response.data.detail);
+      }
+      throw err;
+    }
+  },
 
-    const activity: ActivityEvent = {
-      id: `act-${Date.now()}`,
-      type: 'contact_verification',
-      title: 'Verification Link Dispatched',
-      description: `Cryptographic verification challenge resent to ${contact.email}.`,
-      timestamp: new Date().toISOString(),
-      ipAddress: '198.51.100.42',
-      device: 'Vault Console',
-      method: 'Automated Dispatcher',
-    };
-    const currentActivities = await this.getActivityEvents();
-    localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify([activity, ...currentActivities]));
+  async sendTestEmail(toEmail?: string): Promise<{ success: boolean; message: string; details?: any }> {
+    const resp = await api.post('/checkin/test-email', { to_email: toEmail || null });
+    return resp.data;
+  },
+
+  async sendCheckinReminder(): Promise<{ message: string; deadline: string; hours_remaining: number }> {
+    const resp = await api.post('/checkin/send-reminder');
+    return resp.data;
   },
 
   async getSettings(): Promise<CheckInSettings> {
