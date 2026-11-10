@@ -1,4 +1,4 @@
-# 🔐 LastWord — Dead Man's Switch Vault
+# LastWord — Dead Man's Switch Vault
 
 A secure cloud-based application where users store sensitive documents and notes, assign trusted contacts, and periodically check in. If the user misses their check-in deadline, the system sends warnings and — after a configurable grace period — releases explicitly authorized vault items to designated recipients through secure temporary download links.
 
