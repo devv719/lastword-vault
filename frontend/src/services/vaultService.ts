@@ -1,8 +1,11 @@
+import api from '../api/client';
 import type {
   ActivityEvent,
+  ApiVaultItem,
   CheckInSettings,
   Contact,
   DevForcedState,
+  RemoteVault,
   VaultItem,
   VaultSummary,
 } from '../types';
@@ -111,6 +114,30 @@ export const vaultService = {
     return this.getSummary();
   },
 
+  async getRemoteVault(): Promise<RemoteVault | null> {
+    try {
+      const resp = await api.get<RemoteVault>('/vault');
+      return resp.data;
+    } catch {
+      return null;
+    }
+  },
+
+  async initRemoteVault(
+    envelope: { encryptedKey: string; salt: string; iv: string },
+    name = 'Primary Vault'
+  ): Promise<RemoteVault> {
+    const resp = await api.post<RemoteVault>('/vault', {
+      name,
+      encrypted_vault_key_envelope: envelope.encryptedKey,
+      envelope_salt: envelope.salt,
+      envelope_iv: envelope.iv,
+      kdf_algorithm: 'PBKDF2-SHA256',
+      kdf_iterations: 100000,
+    });
+    return resp.data;
+  },
+
   async getItems(): Promise<VaultItem[]> {
     const forced = getForcedState();
     if (forced === 'loading') await new Promise(() => {});
@@ -121,6 +148,30 @@ export const vaultService = {
     if (forced === 'empty') {
       await delay(150);
       return [];
+    }
+
+    // Attempt real backend call first
+    try {
+      const resp = await api.get<ApiVaultItem[]>('/vault/items');
+      if (Array.isArray(resp.data)) {
+        return resp.data.map((item) => ({
+          id: item.id,
+          title: item.title,
+          type: item.item_type === 'document' ? 'file' : 'note',
+          category: (item.category as any) || 'Documents',
+          originalFilename: item.original_filename || undefined,
+          fileSizeBytes: item.file_size || item.file_size_bytes || undefined,
+          noteContent: item.encrypted_note || item.encrypted_content || undefined,
+          releaseAuthorized: item.release_authorized,
+          recipientId: item.assigned_contact_id || null,
+          recipientName: item.assigned_contact ? item.assigned_contact.name : null,
+          verificationStatus: item.assigned_contact ? 'verified' : 'unassigned',
+          createdAt: item.created_at,
+          updatedAt: item.updated_at,
+        }));
+      }
+    } catch {
+      // Fallback to local storage
     }
 
     await delay(200);
@@ -136,53 +187,111 @@ export const vaultService = {
     }
   },
 
-  async createItem(item: Omit<VaultItem, 'id' | 'createdAt' | 'updatedAt'>): Promise<VaultItem> {
-    await delay(300);
-    const items = await this.getItems();
-    const newItem: VaultItem = {
-      ...item,
-      id: `vlt-${Date.now()}`,
-      createdAt: new Date().toISOString(),
-      updatedAt: new Date().toISOString(),
-    };
-    const updated = [newItem, ...items];
-    localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(updated));
+  async createItem(
+    item: Omit<VaultItem, 'id' | 'createdAt' | 'updatedAt'>,
+    cryptoMeta?: {
+      encryptedTitle?: string;
+      encryptedContent?: string;
+      encryptionIv?: string;
+      mimeType?: string;
+      fileSize?: number;
+    }
+  ): Promise<VaultItem> {
+    try {
+      const resp = await api.post<ApiVaultItem>('/vault/items', {
+        title: item.title,
+        item_type: item.type === 'file' ? 'document' : 'note',
+        category: item.category,
+        encrypted_title: cryptoMeta?.encryptedTitle || null,
+        encrypted_content: cryptoMeta?.encryptedContent || item.noteContent || null,
+        encryption_iv: cryptoMeta?.encryptionIv || null,
+        mime_type: cryptoMeta?.mimeType || null,
+        file_size: cryptoMeta?.fileSize || item.fileSizeBytes || null,
+        encrypted_note: item.noteContent || null,
+        original_filename: item.originalFilename || null,
+        file_size_bytes: item.fileSizeBytes || cryptoMeta?.fileSize || null,
+        release_authorized: item.releaseAuthorized,
+        assigned_contact_id: item.recipientId || null,
+      });
 
-    // Log activity
-    const activity: ActivityEvent = {
-      id: `act-${Date.now()}`,
-      type: 'item_update',
-      title: `New ${item.type === 'file' ? 'Document' : 'Secure Note'} Sealed`,
-      description: `"${item.title}" encrypted and committed to vault inventory.`,
-      timestamp: new Date().toISOString(),
-      ipAddress: '198.51.100.42',
-      device: 'Vault Console',
-      method: 'Client-side AES-GCM Seal',
-    };
-    const currentActivities = await this.getActivityEvents();
-    localStorage.setItem(STORAGE_KEYS.ACTIVITY, JSON.stringify([activity, ...currentActivities]));
+      const backendItem = resp.data;
+      const newItem: VaultItem = {
+        ...item,
+        id: backendItem.id,
+        createdAt: backendItem.created_at,
+        updatedAt: backendItem.updated_at,
+      };
 
-    return newItem;
+      // Also sync to local storage cache
+      const local = await this.getItems();
+      localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify([newItem, ...local]));
+      return newItem;
+    } catch {
+      // Local fallback
+      await delay(300);
+      const items = await this.getItems();
+      const newItem: VaultItem = {
+        ...item,
+        id: `vlt-${Date.now()}`,
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString(),
+      };
+      const updated = [newItem, ...items];
+      localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(updated));
+      return newItem;
+    }
   },
 
   async updateItem(id: string, updates: Partial<VaultItem>): Promise<VaultItem> {
-    await delay(250);
-    const items = await this.getItems();
-    const index = items.findIndex((i) => i.id === id);
-    if (index === -1) throw new Error('Item not found');
+    try {
+      const resp = await api.patch<ApiVaultItem>(`/vault/items/${id}`, {
+        title: updates.title,
+        category: updates.category,
+        release_authorized: updates.releaseAuthorized,
+        assigned_contact_id: updates.recipientId,
+        encrypted_note: updates.noteContent,
+        encrypted_content: updates.noteContent,
+      });
 
-    const updatedItem = {
-      ...items[index],
-      ...updates,
-      updatedAt: new Date().toISOString(),
-    };
-    items[index] = updatedItem;
-    localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(items));
-    return updatedItem;
+      const updated = resp.data;
+      return {
+        id: updated.id,
+        title: updated.title,
+        type: updated.item_type === 'document' ? 'file' : 'note',
+        category: (updated.category as any) || 'Documents',
+        originalFilename: updated.original_filename || undefined,
+        fileSizeBytes: updated.file_size || updated.file_size_bytes || undefined,
+        noteContent: updated.encrypted_content || updated.encrypted_note || undefined,
+        releaseAuthorized: updated.release_authorized,
+        recipientId: updated.assigned_contact_id || null,
+        recipientName: updated.assigned_contact ? updated.assigned_contact.name : null,
+        verificationStatus: updated.assigned_contact ? 'verified' : 'unassigned',
+        createdAt: updated.created_at,
+        updatedAt: updated.updated_at,
+      };
+    } catch {
+      await delay(250);
+      const items = await this.getItems();
+      const index = items.findIndex((i) => i.id === id);
+      if (index === -1) throw new Error('Item not found');
+
+      const updatedItem = {
+        ...items[index],
+        ...updates,
+        updatedAt: new Date().toISOString(),
+      };
+      items[index] = updatedItem;
+      localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(items));
+      return updatedItem;
+    }
   },
 
   async deleteItem(id: string): Promise<void> {
-    await delay(250);
+    try {
+      await api.delete(`/vault/items/${id}`);
+    } catch {
+      // Ignore or fallback
+    }
     const items = await this.getItems();
     const filtered = items.filter((i) => i.id !== id);
     localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(filtered));

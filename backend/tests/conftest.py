@@ -28,6 +28,7 @@ TestSessionLocal = async_sessionmaker(
     bind=test_engine,
     class_=AsyncSession,
     expire_on_commit=False,
+    autoflush=False,
 )
 
 
@@ -42,10 +43,21 @@ async def setup_database():
 
 
 async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
+    """Yield a test database session.
+
+    NOTE: Endpoints already call ``await db.commit()`` explicitly.
+    With aiosqlite + StaticPool (single shared connection), doing a *second*
+    commit in this cleanup path causes a deadlock because the first commit
+    ends the transaction and the follow-up commit implicitly starts a new one
+    on the same serialized connection.  We therefore **do not** commit here;
+    the endpoint's own commit is sufficient.  If the endpoint raises before
+    committing the ``rollback()`` in the except-branch cleans up.
+    """
     async with TestSessionLocal() as session:
         try:
             yield session
-            await session.commit()
+            # Do NOT commit here — endpoints commit explicitly and a second
+            # commit deadlocks on aiosqlite's single-threaded connection.
         except Exception:
             await session.rollback()
             raise

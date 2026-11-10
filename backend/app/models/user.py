@@ -12,6 +12,7 @@ if TYPE_CHECKING:
     from app.models.audit_log import AuditLog
     from app.models.checkin import CheckinRecord
     from app.models.contact import TrustedContact
+    from app.models.vault import Vault
     from app.models.vault_item import VaultItem
 
 
@@ -104,6 +105,11 @@ class User(Base):
 
     vault_items: Mapped[List["VaultItem"]] = relationship(
         "VaultItem",
+        back_populates="user",
+        cascade="all, delete-orphan",
+    )
+    vaults: Mapped[List["Vault"]] = relationship(
+        "Vault",
         back_populates="user",
         cascade="all, delete-orphan",
     )

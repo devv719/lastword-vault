@@ -25,9 +25,13 @@ from app.schemas.user import (
 )
 from app.schemas.vault import (
     AssignContactRequest,
+    VaultCreate,
     VaultItemCreate,
     VaultItemResponse,
     VaultItemUpdate,
+    VaultResponse,
+    VaultSummaryResponse,
+    VaultUpdate,
 )
 
 __all__ = [
@@ -49,6 +53,10 @@ __all__ = [
     "UserUpdateRequest",
     "VerifyEmailRequest",
     "AssignContactRequest",
+    "VaultCreate",
+    "VaultResponse",
+    "VaultUpdate",
+    "VaultSummaryResponse",
     "VaultItemCreate",
     "VaultItemResponse",
     "VaultItemUpdate",

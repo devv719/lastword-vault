@@ -112,3 +112,42 @@ export interface TokenResponse {
   user: AuthUser;
 }
 
+export interface RemoteVault {
+  id: string;
+  user_id: string;
+  name: string;
+  encrypted_vault_key_envelope: string;
+  envelope_salt: string;
+  envelope_iv: string;
+  kdf_algorithm: string;
+  kdf_iterations: number;
+  total_items?: number;
+  documents_count?: number;
+  notes_count?: number;
+  created_at?: string;
+  updated_at?: string;
+}
+
+export interface ApiVaultItem {
+  id: string;
+  user_id: string;
+  vault_id?: string | null;
+  item_type: 'document' | 'note';
+  title: string;
+  encrypted_title?: string | null;
+  encrypted_content?: string | null;
+  encryption_iv?: string | null;
+  mime_type?: string | null;
+  file_size?: number | null;
+  category?: VaultCategory | string;
+  encrypted_note?: string | null;
+  s3_key?: string | null;
+  original_filename?: string | null;
+  file_size_bytes?: number | null;
+  release_authorized: boolean;
+  assigned_contact_id?: string | null;
+  assigned_contact?: { id: string; name: string; email: string } | null;
+  created_at: string;
+  updated_at: string;
+}
+

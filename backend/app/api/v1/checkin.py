@@ -81,6 +81,8 @@ async def perform_checkin(
         user_agent=user_agent,
     )
 
+    await db.commit()
+
     return CheckinResponse(
         message="Heartbeat successfully authenticated. Fail-safe timer reset to nominal.",
         status=current_user.status,

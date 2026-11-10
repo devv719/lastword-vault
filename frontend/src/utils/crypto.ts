@@ -269,3 +269,50 @@ export async function decryptVaultData(
   return dec.decode(decrypted);
 }
 
+/**
+ * Encrypt arbitrary binary ArrayBuffer (such as a file) using AES-256-GCM.
+ */
+export async function encryptBinaryData(
+  data: ArrayBuffer,
+  vaultKey: CryptoKey
+): Promise<EncryptedDataPayload> {
+  const subtle = getCrypto();
+  const cryptoObj = typeof window !== 'undefined' ? window.crypto : globalThis.crypto;
+
+  const iv = cryptoObj.getRandomValues(new Uint8Array(12));
+  const ciphertext = await subtle.encrypt(
+    {
+      name: 'AES-GCM',
+      iv: iv as BufferSource,
+    },
+    vaultKey,
+    data
+  );
+
+  return {
+    ciphertext: bufferToBase64(ciphertext),
+    iv: bufferToBase64(iv),
+  };
+}
+
+/**
+ * Decrypt ciphertext back into a binary ArrayBuffer.
+ */
+export async function decryptBinaryData(
+  payload: EncryptedDataPayload,
+  vaultKey: CryptoKey
+): Promise<ArrayBuffer> {
+  const subtle = getCrypto();
+  const iv = base64ToBuffer(payload.iv);
+  const ciphertext = base64ToBuffer(payload.ciphertext);
+
+  return await subtle.decrypt(
+    {
+      name: 'AES-GCM',
+      iv: iv as BufferSource,
+    },
+    vaultKey,
+    ciphertext as BufferSource
+  );
+}
+

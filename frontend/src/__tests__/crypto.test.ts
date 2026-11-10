@@ -8,6 +8,8 @@ import {
   persistKeyEnvelope,
   loadKeyEnvelope,
   clearKeyEnvelope,
+  encryptBinaryData,
+  decryptBinaryData,
 } from '../utils/crypto';
 
 describe('Zero-Knowledge Client-Side Cryptography', () => {
@@ -71,6 +73,23 @@ describe('Zero-Knowledge Client-Side Cryptography', () => {
 
     clearKeyEnvelope(userEmail);
     expect(loadKeyEnvelope(userEmail)).toBeNull();
+  });
+
+  it('encrypts and decrypts binary files byte-for-byte using AES-256-GCM', async () => {
+    const key = await generateVaultKey();
+    const testData = new Uint8Array([0xde, 0xad, 0xbe, 0xef, 0xca, 0xfe, 0xba, 0xbe]);
+
+    const encrypted = await encryptBinaryData(testData.buffer, key);
+    expect(encrypted.ciphertext).toBeTypeOf('string');
+    expect(encrypted.iv).toBeTypeOf('string');
+
+    const decryptedBuffer = await decryptBinaryData(encrypted, key);
+    const decryptedBytes = new Uint8Array(decryptedBuffer);
+
+    expect(decryptedBytes.length).toBe(testData.length);
+    for (let i = 0; i < testData.length; i++) {
+      expect(decryptedBytes[i]).toBe(testData[i]);
+    }
   });
 });
 

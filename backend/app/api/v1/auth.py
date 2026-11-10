@@ -160,6 +160,8 @@ async def login(
         user_agent=request.headers.get("user-agent"),
     )
 
+    await db.commit()
+
     return TokenResponse(
         access_token=token_str,
         token_type="bearer",
@@ -202,6 +204,8 @@ async def logout(
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+
+    await db.commit()
 
     return LogoutResponse(message="Session successfully terminated and token revoked")
 

@@ -30,6 +30,7 @@ interface AuthContextType {
   register: (params: RegisterParams) => Promise<void>;
   login: (params: LoginParams) => Promise<void>;
   logout: () => Promise<void>;
+  lockVault: () => void;
   unlockVault: (password: string) => Promise<boolean>;
   refreshUser: () => Promise<void>;
 }
@@ -86,10 +87,39 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     };
   }, [clearAuthState]);
 
+  // Lock the vault by purging the raw unwrapped CryptoKey from volatile memory
+  const lockVault = useCallback(() => {
+    setVaultKey(null);
+  }, []);
+
   // Unlock / recover the vault key in memory using master password
   const unlockVault = async (password: string): Promise<boolean> => {
     if (!user) return false;
-    const envelope = loadKeyEnvelope(user.id) || loadKeyEnvelope(user.email);
+    let envelope = loadKeyEnvelope(user.id) || loadKeyEnvelope(user.email);
+
+    // If envelope is missing locally (e.g. new browser session/device), fetch from backend
+    if (!envelope) {
+      try {
+        const resp = await api.get<{
+          encrypted_vault_key_envelope: string;
+          envelope_salt: string;
+          envelope_iv: string;
+        }>('/vault');
+        if (resp.data?.encrypted_vault_key_envelope) {
+          envelope = {
+            encryptedKey: resp.data.encrypted_vault_key_envelope,
+            salt: resp.data.envelope_salt,
+            iv: resp.data.envelope_iv,
+            version: 1,
+          };
+          persistKeyEnvelope(user.id, envelope);
+          persistKeyEnvelope(user.email, envelope);
+        }
+      } catch {
+        // Vault not found on backend yet
+      }
+    }
+
     if (!envelope) return false;
 
     try {
@@ -110,7 +140,6 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     const keyEnvelope = await wrapVaultKey(clientVaultKey, password);
 
     // 3. Register user with backend (transmitting only display_name, email, password for Argon2)
-    // Never transmit plaintext vault keys or encryption material to the server
     const response = await api.post<TokenResponse>('/auth/register', {
       email,
       password,
@@ -128,6 +157,24 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     setToken(access_token);
     setUser(registeredUser);
     setVaultKey(clientVaultKey); // Active in memory for this session
+
+    // 6. Save encrypted key envelope to backend so it can be recovered across devices
+    try {
+      await api.post(
+        '/vault',
+        {
+          name: 'Primary Vault',
+          encrypted_vault_key_envelope: keyEnvelope.encryptedKey,
+          envelope_salt: keyEnvelope.salt,
+          envelope_iv: keyEnvelope.iv,
+          kdf_algorithm: 'PBKDF2-SHA256',
+          kdf_iterations: 100000,
+        },
+        { headers: { Authorization: `Bearer ${access_token}` } }
+      );
+    } catch (vaultErr) {
+      console.warn('Initial backend vault sync error (non-fatal):', vaultErr);
+    }
   };
 
   // User Login with Zero-Knowledge Client Key Recovery
@@ -140,11 +187,35 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
 
     const { access_token, user: authenticatedUser } = response.data;
 
-    // 2. Recover encrypted vault key envelope from client storage
-    const envelope =
+    // 2. Recover encrypted vault key envelope from client storage or backend
+    let envelope =
       loadKeyEnvelope(authenticatedUser.id) ||
       loadKeyEnvelope(authenticatedUser.email) ||
       loadKeyEnvelope(email);
+
+    if (!envelope) {
+      try {
+        const vaultResp = await api.get<{
+          encrypted_vault_key_envelope: string;
+          envelope_salt: string;
+          envelope_iv: string;
+        }>('/vault', {
+          headers: { Authorization: `Bearer ${access_token}` },
+        });
+        if (vaultResp.data?.encrypted_vault_key_envelope) {
+          envelope = {
+            encryptedKey: vaultResp.data.encrypted_vault_key_envelope,
+            salt: vaultResp.data.envelope_salt,
+            iv: vaultResp.data.envelope_iv,
+            version: 1,
+          };
+          persistKeyEnvelope(authenticatedUser.id, envelope);
+          persistKeyEnvelope(authenticatedUser.email, envelope);
+        }
+      } catch {
+        // No remote vault envelope found
+      }
+    }
 
     if (envelope) {
       try {
@@ -155,14 +226,27 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
         console.error('Failed to unwrap vault key with provided master password:', err);
       }
     } else {
-      // If logging in on a new device where local envelope is absent,
-      // generate and initialize a key envelope for this device
+      // If logging in on a new device where local/remote envelope is absent, initialize fresh
       try {
         const freshKey = await generateVaultKey();
         const freshEnvelope = await wrapVaultKey(freshKey, password);
         persistKeyEnvelope(authenticatedUser.id, freshEnvelope);
         persistKeyEnvelope(authenticatedUser.email, freshEnvelope);
         setVaultKey(freshKey);
+
+        // Sync to backend
+        await api.post(
+          '/vault',
+          {
+            name: 'Primary Vault',
+            encrypted_vault_key_envelope: freshEnvelope.encryptedKey,
+            envelope_salt: freshEnvelope.salt,
+            envelope_iv: freshEnvelope.iv,
+            kdf_algorithm: 'PBKDF2-SHA256',
+            kdf_iterations: 100000,
+          },
+          { headers: { Authorization: `Bearer ${access_token}` } }
+        );
       } catch (err) {
         console.error('Could not initialize client vault key envelope:', err);
       }
@@ -209,6 +293,7 @@ export const AuthProvider: React.FC<{ children: React.ReactNode }> = ({ children
     register: registerUser,
     login: loginUser,
     logout: logoutUser,
+    lockVault,
     unlockVault,
     refreshUser,
   };

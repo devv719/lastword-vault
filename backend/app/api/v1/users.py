@@ -88,6 +88,9 @@ async def update_profile(
         user_agent=request.headers.get("user-agent"),
     )
 
+    await db.commit()
+    await db.refresh(current_user)
+
     return UserResponse.model_validate(current_user)
 
 
@@ -133,6 +136,8 @@ async def request_email_change(
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+
+    await db.commit()
 
     return ChangeEmailResponse(
         message=f"Verification token generated for {new_email}. Confirm using the verify-email endpoint.",
@@ -189,6 +194,9 @@ async def verify_email_change(
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+
+    await db.commit()
+    await db.refresh(current_user)
 
     return UserResponse.model_validate(current_user)
 

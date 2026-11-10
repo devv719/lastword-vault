@@ -58,6 +58,8 @@ async def create_contact(
         user_agent=request.headers.get("user-agent"),
     )
 
+    await db.commit()
+
     return ContactResponse.model_validate(contact)
 
 
@@ -158,6 +160,9 @@ async def update_contact(
         user_agent=request.headers.get("user-agent"),
     )
 
+    await db.commit()
+    await db.refresh(contact)
+
     return ContactResponse.model_validate(contact)
 
 
@@ -197,6 +202,8 @@ async def delete_contact(
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+
+    await db.commit()
 
     return Response(status_code=status.HTTP_204_NO_CONTENT)
 
@@ -247,6 +254,9 @@ async def verify_contact(
         ip_address=get_client_ip(request),
         user_agent=request.headers.get("user-agent"),
     )
+
+    await db.commit()
+    await db.refresh(contact)
 
     return ContactResponse.model_validate(contact)
 
