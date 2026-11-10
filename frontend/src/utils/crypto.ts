@@ -44,10 +44,28 @@ export function base64ToBuffer(base64: string): Uint8Array {
   return bytes;
 }
 
+/**
+ * Check whether the current browser environment supports the W3C Web Crypto API.
+ * Web Crypto (window.crypto.subtle) is restricted to Secure Contexts (HTTPS or localhost).
+ */
+export function isWebCryptoSupported(): boolean {
+  if (typeof window === 'undefined') {
+    return Boolean(globalThis.crypto?.subtle);
+  }
+  return Boolean(window.isSecureContext && window.crypto && window.crypto.subtle);
+}
+
 const getCrypto = (): SubtleCrypto => {
   const cryptoObj = typeof window !== 'undefined' ? window.crypto : globalThis.crypto;
   if (!cryptoObj || !cryptoObj.subtle) {
-    throw new Error('Web Crypto API is not available in this environment');
+    const isSecure = typeof window !== 'undefined' ? window.isSecureContext : false;
+    if (!isSecure) {
+      throw new Error(
+        'Web Crypto API is disabled by your browser because this site is being accessed over insecure HTTP. ' +
+        'Zero-knowledge encryption requires a Secure Context (HTTPS or localhost).'
+      );
+    }
+    throw new Error('Web Crypto API is not available in this browser environment.');
   }
   return cryptoObj.subtle;
 };

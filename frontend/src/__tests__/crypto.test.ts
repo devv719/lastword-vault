@@ -10,6 +10,7 @@ import {
   clearKeyEnvelope,
   encryptBinaryData,
   decryptBinaryData,
+  isWebCryptoSupported,
 } from '../utils/crypto';
 
 describe('Zero-Knowledge Client-Side Cryptography', () => {
@@ -90,6 +91,11 @@ describe('Zero-Knowledge Client-Side Cryptography', () => {
     for (let i = 0; i < testData.length; i++) {
       expect(decryptedBytes[i]).toBe(testData[i]);
     }
+  });
+
+  it('detects secure context Web Crypto API availability accurately', () => {
+    // In Node.js / happy-dom test environment, globalThis.crypto.subtle is present
+    expect(isWebCryptoSupported()).toBe(true);
   });
 });
 

@@ -162,6 +162,7 @@ export const vaultService = {
           originalFilename: item.original_filename || undefined,
           fileSizeBytes: item.file_size || item.file_size_bytes || undefined,
           noteContent: item.encrypted_note || item.encrypted_content || undefined,
+          s3Key: item.s3_key || null,
           releaseAuthorized: item.release_authorized,
           recipientId: item.assigned_contact_id || null,
           recipientName: item.assigned_contact ? item.assigned_contact.name : null,
@@ -197,21 +198,29 @@ export const vaultService = {
       fileSize?: number;
     }
   ): Promise<VaultItem> {
+    const isValidUuid = (val?: string | null) =>
+      Boolean(val && /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(val));
+
+    // For file documents, large ciphertext is uploaded to S3 via PUT /vault/items/{id}/file
+    // Avoid sending multi-megabyte ciphertext in POST /vault/items to prevent 413/422 payload errors
+    const isDocument = item.type === 'file';
+    const contentToSend = isDocument ? null : (cryptoMeta?.encryptedContent || item.noteContent || null);
+
     try {
       const resp = await api.post<ApiVaultItem>('/vault/items', {
         title: item.title,
-        item_type: item.type === 'file' ? 'document' : 'note',
+        item_type: isDocument ? 'document' : 'note',
         category: item.category,
         encrypted_title: cryptoMeta?.encryptedTitle || null,
-        encrypted_content: cryptoMeta?.encryptedContent || item.noteContent || null,
+        encrypted_content: contentToSend,
         encryption_iv: cryptoMeta?.encryptionIv || null,
         mime_type: cryptoMeta?.mimeType || null,
         file_size: cryptoMeta?.fileSize || item.fileSizeBytes || null,
-        encrypted_note: item.noteContent || null,
+        encrypted_note: contentToSend,
         original_filename: item.originalFilename || null,
         file_size_bytes: item.fileSizeBytes || cryptoMeta?.fileSize || null,
         release_authorized: item.releaseAuthorized,
-        assigned_contact_id: item.recipientId || null,
+        assigned_contact_id: isValidUuid(item.recipientId) ? item.recipientId : null,
       });
 
       const backendItem = resp.data;
@@ -226,20 +235,107 @@ export const vaultService = {
       const local = await this.getItems();
       localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify([newItem, ...local]));
       return newItem;
-    } catch {
-      // Local fallback
-      await delay(300);
-      const items = await this.getItems();
-      const newItem: VaultItem = {
-        ...item,
-        id: `vlt-${Date.now()}`,
-        createdAt: new Date().toISOString(),
-        updatedAt: new Date().toISOString(),
-      };
-      const updated = [newItem, ...items];
-      localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(updated));
-      return newItem;
+    } catch (err: any) {
+      // If the backend responded with an HTTP error (422, 400, 404, 500, etc.),
+      // DO NOT mask it with fake vlt-* local storage fallback!
+      // Throw the real error with the backend's validation details so callers and users know.
+      if (err?.response) {
+        const detail = err.response.data?.detail;
+        const msg = typeof detail === 'string'
+          ? detail
+          : Array.isArray(detail)
+            ? detail.map((d: any) => `${d.loc ? d.loc.slice(1).join('.') + ': ' : ''}${d.msg}`).join(', ')
+            : JSON.stringify(detail || err.message);
+        throw new Error(`API Error (${err.response.status}): ${msg}`);
+      }
+
+      // Only fallback to local storage if purely offline / demo without backend connectivity
+      const isNetworkError = err?.code === 'ERR_NETWORK' || !err?.response;
+      if (isNetworkError && !item.originalFilename) {
+        await delay(300);
+        const items = await this.getItems();
+        const newItem: VaultItem = {
+          ...item,
+          id: `vlt-${Date.now()}`,
+          createdAt: new Date().toISOString(),
+          updatedAt: new Date().toISOString(),
+        };
+        const updated = [newItem, ...items];
+        localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(updated));
+        return newItem;
+      }
+
+      throw err;
     }
+  },
+
+  async uploadFile(
+    itemId: string,
+    fileData: ArrayBuffer | Uint8Array | Blob,
+    metadata?: { originalFilename?: string; mimeType?: string }
+  ): Promise<VaultItem> {
+    const formData = new FormData();
+    const blob = fileData instanceof Blob
+      ? fileData
+      : new Blob([fileData as any], { type: metadata?.mimeType || 'application/octet-stream' });
+    formData.append('file', blob, metadata?.originalFilename || 'encrypted.bin');
+
+    const resp = await api.put<ApiVaultItem>(`/vault/items/${itemId}/file`, formData, {
+      headers: {
+        'Content-Type': 'multipart/form-data',
+      },
+    });
+
+    const updated = resp.data;
+    const item: VaultItem = {
+      id: updated.id,
+      title: updated.title,
+      type: 'file',
+      category: (updated.category as any) || 'Documents',
+      originalFilename: updated.original_filename || metadata?.originalFilename || undefined,
+      fileSizeBytes: updated.file_size || updated.file_size_bytes || undefined,
+      noteContent: undefined,
+      s3Key: updated.s3_key || null,
+      releaseAuthorized: updated.release_authorized,
+      recipientId: updated.assigned_contact_id || null,
+      recipientName: updated.assigned_contact ? updated.assigned_contact.name : null,
+      verificationStatus: updated.assigned_contact ? 'verified' : 'unassigned',
+      createdAt: updated.created_at,
+      updatedAt: updated.updated_at,
+    };
+
+    // Update local cache
+    const items = await this.getItems();
+    const idx = items.findIndex((i) => i.id === itemId);
+    if (idx !== -1) {
+      items[idx] = item;
+    } else {
+      items.unshift(item);
+    }
+    localStorage.setItem(STORAGE_KEYS.ITEMS, JSON.stringify(items));
+    return item;
+  },
+
+  async downloadFile(itemId: string): Promise<{
+    data: ArrayBuffer;
+    iv: string;
+    originalFilename?: string;
+    mimeType?: string;
+  }> {
+    const resp = await api.get(`/vault/items/${itemId}/file`, {
+      responseType: 'arraybuffer',
+    });
+
+    const iv = (resp.headers['x-encryption-iv'] || resp.headers['X-Encryption-IV'] || '') as string;
+    const originalFilename = (resp.headers['x-original-filename'] || resp.headers['X-Original-Filename'] || '') as string;
+    const mimeType = (resp.headers['content-type'] || 'application/octet-stream') as string;
+
+    return {
+      data: resp.data as ArrayBuffer,
+      iv,
+      originalFilename: originalFilename || undefined,
+      mimeType,
+    };
   },
 
   async updateItem(id: string, updates: Partial<VaultItem>): Promise<VaultItem> {
@@ -309,6 +405,29 @@ export const vaultService = {
       return [];
     }
 
+    // 1. Try real backend API first
+    try {
+      const resp = await api.get<any[]>('/contacts');
+      if (Array.isArray(resp.data)) {
+        const contacts: Contact[] = resp.data.map((c) => ({
+          id: c.id,
+          name: c.name,
+          email: c.email,
+          relationship: c.relationship_type || 'Trusted Contact',
+          status: c.verified ? 'verified' : 'pending',
+          assignedItemsCount: 0,
+          phone: c.phone || undefined,
+          verifiedAt: c.verified_at || undefined,
+          createdAt: c.created_at,
+        }));
+        localStorage.setItem(STORAGE_KEYS.CONTACTS, JSON.stringify(contacts));
+        return contacts;
+      }
+    } catch {
+      // Backend not reached, fall through to localStorage
+    }
+
+    // 2. Local fallback
     await delay(180);
     const raw = localStorage.getItem(STORAGE_KEYS.CONTACTS);
     if (!raw) {

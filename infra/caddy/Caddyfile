@@ -1,0 +1,66 @@
+# ==============================================================================
+# LastWord — Production Caddyfile Reverse Proxy with Automatic HTTPS
+# ==============================================================================
+#
+# When DOMAIN is configured (e.g. DOMAIN=vault.yourdomain.com,
+# DOMAIN=lastword.duckdns.org, or DOMAIN=3.109.2.254.sslip.io):
+# - Caddy automatically provisions and renews trusted TLS certificates via Let's Encrypt.
+# - Automatically redirects HTTP (port 80) to HTTPS (port 443).
+# - Enforces modern TLS (TLS 1.2/1.3) and strict security headers.
+#
+# Default fallback when no domain is provided:
+# - Serves on :80 and proxies traffic to frontend and backend containers.
+# ==============================================================================
+
+{$DOMAIN::80} {
+    # ── Security & Hardening Headers ──────────────────────────────────────────
+    header {
+        # Enforce HTTPS via HSTS (365 days)
+        Strict-Transport-Security "max-age=31536000; includeSubDomains; preload"
+        # Prevent MIME type sniffing
+        X-Content-Type-Options "nosniff"
+        # Prevent clickjacking
+        X-Frame-Options "DENY"
+        # Control referrer information
+        Referrer-Policy "strict-origin-when-cross-origin"
+        # Disallow unwanted browser features
+        Permissions-Policy "camera=(), microphone=(), geolocation=()"
+        # Remove server identity header
+        -Server
+    }
+
+    # ── Upload Limit ──────────────────────────────────────────────────────────
+    request_body {
+        max_size 50MB
+    }
+
+    # ── Proxy /api/* to FastAPI Backend ───────────────────────────────────────
+    handle /api/* {
+        reverse_proxy backend:8000 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # ── Proxy all other requests to React Frontend ────────────────────────────
+    handle {
+        reverse_proxy frontend:80 {
+            header_up Host {host}
+            header_up X-Real-IP {remote_host}
+            header_up X-Forwarded-For {remote_host}
+            header_up X-Forwarded-Proto {scheme}
+        }
+    }
+
+    # ── Compression ───────────────────────────────────────────────────────────
+    encode zstd gzip
+
+    # ── Access Logging ────────────────────────────────────────────────────────
+    log {
+        output stdout
+        format console
+    }
+}
+

@@ -1,8 +1,8 @@
 from datetime import datetime
-from typing import List, Optional
+from typing import Any, List, Optional
 import uuid
 
-from pydantic import BaseModel, ConfigDict, Field
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from app.schemas.contact import ContactResponse
 
@@ -59,6 +59,21 @@ class VaultItemCreate(BaseModel):
     release_authorized: bool = False
     assigned_contact_id: Optional[uuid.UUID] = None
 
+    @field_validator("assigned_contact_id", mode="before")
+    @classmethod
+    def sanitize_assigned_contact_id(cls, v: Any) -> Optional[uuid.UUID]:
+        if not v or v in ("null", "none", "unassigned", ""):
+            return None
+        if isinstance(v, uuid.UUID):
+            return v
+        if isinstance(v, str):
+            try:
+                return uuid.UUID(v)
+            except (ValueError, AttributeError):
+                # Ignore mock or non-UUID strings rather than failing with 422
+                return None
+        return None
+
 
 class VaultItemUpdate(BaseModel):
     title: Optional[str] = Field(None, max_length=255)
@@ -75,6 +90,20 @@ class VaultItemUpdate(BaseModel):
     file_size_bytes: Optional[int] = None
     release_authorized: Optional[bool] = None
     assigned_contact_id: Optional[uuid.UUID] = None
+
+    @field_validator("assigned_contact_id", mode="before")
+    @classmethod
+    def sanitize_assigned_contact_id(cls, v: Any) -> Optional[uuid.UUID]:
+        if not v or v in ("null", "none", "unassigned", ""):
+            return None
+        if isinstance(v, uuid.UUID):
+            return v
+        if isinstance(v, str):
+            try:
+                return uuid.UUID(v)
+            except (ValueError, AttributeError):
+                return None
+        return None
 
 
 class AssignContactRequest(BaseModel):

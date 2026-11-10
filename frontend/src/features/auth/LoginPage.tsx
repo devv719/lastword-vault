@@ -3,12 +3,13 @@ import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
-import { AlertCircle } from 'lucide-react';
+import { AlertCircle, ShieldAlert } from 'lucide-react';
 import axios from 'axios';
 import toast from 'react-hot-toast';
 import { Input, PasswordInput } from '../../components/ui/Input';
 import { PillButton } from '../../components/ui/PillButton';
 import { useAuth } from '../../context/AuthContext';
+import { isWebCryptoSupported } from '../../utils/crypto';
 
 const loginSchema = z.object({
   email: z.string().min(1, 'Email is required').email('Enter a valid email address'),
@@ -75,6 +76,25 @@ export const LoginPage: React.FC = () => {
           Authenticate using your master passphrase to manage directives and check in.
         </p>
       </div>
+
+      {/* Insecure Context Warning */}
+      {!isWebCryptoSupported() && (
+        <div
+          role="alert"
+          className="p-4 rounded-2xl bg-amber-500/10 border border-amber-500/30 flex items-start gap-3"
+        >
+          <ShieldAlert className="w-5 h-5 text-amber-600 shrink-0 mt-0.5" />
+          <div className="space-y-1">
+            <p className="text-xs font-semibold text-amber-700">HTTPS / Secure Context Required</p>
+            <p className="text-xs text-navy/80 leading-relaxed">
+              Your browser blocks the Web Cryptography API over unencrypted public HTTP (<code className="bg-amber-100/50 px-1 py-0.5 rounded font-mono text-[11px]">http://{typeof window !== 'undefined' ? window.location.host : 'ip'}</code>). Master key unwrapping is disabled.
+            </p>
+            <p className="text-xs text-navy/70 leading-relaxed mt-1">
+              Please access this vault over <strong>HTTPS</strong> or through a local tunnel (e.g. <code className="bg-amber-100/50 px-1 py-0.5 rounded font-mono text-[11px]">http://localhost:8080</code>).
+            </p>
+          </div>
+        </div>
+      )}
 
       {/* Error Banner */}
       {authError && (

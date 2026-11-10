@@ -251,3 +251,78 @@ async def test_assign_contact_to_vault_item(client: AsyncClient, auth_user: dict
     )
     assert unassign_resp.status_code == 200
     assert unassign_resp.json()["assigned_contact_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_vault_item_assigned_contact_id_sanitization(client: AsyncClient, auth_user: dict):
+    headers = auth_user["headers"]
+
+    # Test that empty string, None, or mock IDs like "cnt-1" do NOT trigger 422 Unprocessable Entity
+    payload = {
+        "title": "Directive with Empty Contact ID",
+        "item_type": "note",
+        "assigned_contact_id": "",
+    }
+    resp = await client.post("/api/v1/vault/items", json=payload, headers=headers)
+    assert resp.status_code == 201
+    assert resp.json()["assigned_contact_id"] is None
+
+    payload_mock = {
+        "title": "Directive with Mock Contact ID",
+        "item_type": "note",
+        "assigned_contact_id": "cnt-1",
+    }
+    resp_mock = await client.post("/api/v1/vault/items", json=payload_mock, headers=headers)
+    assert resp_mock.status_code == 201
+    assert resp_mock.json()["assigned_contact_id"] is None
+
+
+@pytest.mark.asyncio
+async def test_vault_item_file_upload_and_legacy_download(client: AsyncClient, auth_user: dict):
+    headers = auth_user["headers"]
+
+    # 1. Create a document item metadata record
+    create_resp = await client.post(
+        "/api/v1/vault/items",
+        json={
+            "title": "Will and Testament PDF",
+            "item_type": "document",
+            "original_filename": "will.pdf",
+            "mime_type": "application/pdf",
+            "file_size": 1024,
+        },
+        headers=headers,
+    )
+    assert create_resp.status_code == 201
+    item_id = create_resp.json()["id"]
+
+    # 2. Upload file bytes via PUT /api/v1/vault/items/{item_id}/file
+    dummy_encrypted_bytes = b"AES256GCM_ENCRYPTED_CIPHERTEXT_BYTES_HERE"
+    upload_resp = await client.put(
+        f"/api/v1/vault/items/{item_id}/file",
+        files={"file": ("will.pdf", dummy_encrypted_bytes, "application/octet-stream")},
+        headers=headers,
+    )
+    assert upload_resp.status_code == 200
+    uploaded_data = upload_resp.json()
+    assert uploaded_data["id"] == item_id
+    assert uploaded_data["file_size_bytes"] == len(dummy_encrypted_bytes)
+    assert uploaded_data["s3_key"] is not None
+
+    # 3. Create a legacy item with DB encrypted_content and verify download
+    legacy_payload = {
+        "title": "Legacy Item",
+        "item_type": "document",
+        "original_filename": "legacy.txt",
+        "encrypted_content": '{"ciphertext": "aGVsbG8gd29ybGQ=", "iv": "aXZleGFtcGxl"}',
+        "encryption_iv": "aXZleGFtcGxl",
+    }
+    legacy_create = await client.post("/api/v1/vault/items", json=legacy_payload, headers=headers)
+    assert legacy_create.status_code == 201
+    legacy_id = legacy_create.json()["id"]
+
+    download_resp = await client.get(f"/api/v1/vault/items/{legacy_id}/file", headers=headers)
+    assert download_resp.status_code == 200
+    assert download_resp.content == b"hello world"
+    assert download_resp.headers.get("x-encryption-iv") == "aXZleGFtcGxl"
+

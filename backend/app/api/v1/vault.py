@@ -1,8 +1,11 @@
+import base64
 from datetime import datetime, timezone
+import json
+import logging
 from typing import List, Optional
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, Response, status
+from fastapi import APIRouter, Depends, File, HTTPException, Query, Request, Response, UploadFile, status
 from sqlalchemy import func, or_, select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -24,6 +27,14 @@ from app.schemas.vault import (
     VaultUpdate,
 )
 from app.services.audit_service import record_audit_log
+from app.services.s3_service import (
+    delete_encrypted_file,
+    download_encrypted_file,
+    get_s3_object_key,
+    upload_encrypted_file,
+)
+
+logger = logging.getLogger(__name__)
 
 router = APIRouter(prefix="/vault", tags=["Vault"])
 
@@ -519,6 +530,15 @@ async def delete_item_in_vault(
         )
 
     title = item.title
+    s3_key = item.s3_key
+
+    # Delete encrypted binary object from S3 if present
+    if s3_key:
+        try:
+            delete_encrypted_file(s3_key)
+        except Exception as e:
+            logger.warning(f"Failed to delete S3 file for vault item {item.id} ({s3_key}): {e}")
+
     await db.delete(item)
 
     try:
@@ -792,6 +812,15 @@ async def delete_vault_item(
         )
 
     title = item.title
+    s3_key = item.s3_key
+
+    # Delete encrypted binary object from S3 if present
+    if s3_key:
+        try:
+            delete_encrypted_file(s3_key)
+        except Exception as e:
+            logger.warning(f"Failed to delete S3 file for vault item {item.id} ({s3_key}): {e}")
+
     await db.delete(item)
 
     try:
@@ -920,3 +949,273 @@ async def unassign_contact_from_item(
         await db.refresh(item, attribute_names=["assigned_contact"])
 
     return VaultItemResponse.model_validate(item)
+
+
+# =========================================================================
+# S3 ENCRYPTED FILE STORAGE ENDPOINTS
+# =========================================================================
+
+MAX_FILE_SIZE_BYTES = 50 * 1024 * 1024  # 50 MB limit
+
+
+async def _handle_file_upload(
+    item_id: uuid.UUID,
+    request: Request,
+    current_user: User,
+    db: AsyncSession,
+    file: Optional[UploadFile] = None,
+) -> VaultItemResponse:
+    """Core logic to authenticate, validate, and store encrypted bytes in S3."""
+    query = (
+        select(VaultItem)
+        .options(selectinload(VaultItem.assigned_contact))
+        .where(
+            VaultItem.id == item_id,
+            VaultItem.user_id == current_user.id,
+        )
+    )
+    result = await db.execute(query)
+    item = result.scalar_one_or_none()
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault item not found",
+        )
+
+    content_type_header = request.headers.get("content-type", "")
+    file_data: bytes = b""
+    detected_mime: Optional[str] = item.mime_type
+
+    if file is not None:
+        file_data = await file.read()
+        detected_mime = file.content_type or detected_mime
+    elif "multipart/form-data" in content_type_header:
+        form = await request.form()
+        uploaded = form.get("file")
+        if uploaded is not None and hasattr(uploaded, "read"):
+            file_data = await uploaded.read()
+            detected_mime = getattr(uploaded, "content_type", detected_mime)
+        elif uploaded is not None and isinstance(uploaded, (bytes, bytearray)):
+            file_data = bytes(uploaded)
+    elif "application/json" in content_type_header:
+        try:
+            body = await request.json()
+            raw_cipher = body.get("ciphertext") or body.get("encrypted_content")
+            if raw_cipher:
+                file_data = base64.b64decode(raw_cipher)
+            if body.get("encryption_iv"):
+                item.encryption_iv = body.get("encryption_iv")
+            if body.get("mime_type"):
+                detected_mime = body.get("mime_type")
+        except Exception as e:
+            raise HTTPException(
+                status_code=status.HTTP_400_BAD_REQUEST,
+                detail=f"Invalid JSON payload: {str(e)}",
+            )
+    else:
+        # Raw binary body
+        file_data = await request.body()
+
+    if not file_data:
+        raise HTTPException(
+            status_code=status.HTTP_400_BAD_REQUEST,
+            detail="Encrypted file payload is empty",
+        )
+
+    if len(file_data) > MAX_FILE_SIZE_BYTES:
+        raise HTTPException(
+            status_code=status.HTTP_413_REQUEST_ENTITY_TOO_LARGE,
+            detail=f"File exceeds maximum allowed size of {MAX_FILE_SIZE_BYTES // (1024 * 1024)} MB",
+        )
+
+    # Server-generated isolated S3 key: users/{user_id}/items/{item_id}
+    s3_key = get_s3_object_key(str(current_user.id), str(item.id))
+
+    try:
+        upload_encrypted_file(
+            s3_key=s3_key,
+            file_data=file_data,
+            content_type="application/octet-stream",
+        )
+    except Exception as exc:
+        logger.error(f"S3 upload failed for item {item.id}: {exc}")
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Failed to persist encrypted document to storage: {str(exc)}",
+        )
+
+    now = datetime.now(timezone.utc)
+    item.s3_key = s3_key
+    item.file_size_bytes = len(file_data)
+    item.file_size = len(file_data)
+    if detected_mime:
+        item.mime_type = detected_mime
+    item.encrypted_content = None  # Clean duplicate large binary from PostgreSQL
+    item.updated_at = now
+
+    db.add(item)
+    await db.flush()
+
+    try:
+        await record_audit_log(
+            session=db,
+            user_id=current_user.id,
+            event_type="VAULT",
+            action="DOCUMENT_UPLOADED_TO_S3",
+            description=f"Encrypted document uploaded for item {item.title} ({len(file_data)} bytes)",
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+    except Exception:
+        pass
+
+    await db.commit()
+    await db.refresh(item, attribute_names=["assigned_contact"])
+
+    return VaultItemResponse.model_validate(item)
+
+
+async def _handle_file_download(
+    item_id: uuid.UUID,
+    request: Request,
+    current_user: User,
+    db: AsyncSession,
+) -> Response:
+    """Core logic to authenticate, authorize, and fetch encrypted ciphertext."""
+    query = select(VaultItem).where(
+        VaultItem.id == item_id,
+        VaultItem.user_id == current_user.id,
+    )
+    result = await db.execute(query)
+    item = result.scalar_one_or_none()
+    if item is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="Vault item not found",
+        )
+
+    file_bytes: Optional[bytes] = None
+    content_type = item.mime_type or "application/octet-stream"
+
+    # 1. Fetch from S3 if s3_key is set
+    if item.s3_key:
+        try:
+            file_bytes, s3_ct = download_encrypted_file(item.s3_key)
+            if s3_ct and not item.mime_type:
+                content_type = s3_ct
+        except FileNotFoundError:
+            logger.warning(f"S3 key {item.s3_key} not found on S3; checking fallback.")
+        except Exception as exc:
+            logger.error(f"S3 download failed for {item.s3_key}: {exc}")
+            raise HTTPException(
+                status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+                detail=f"Storage retrieval error: {str(exc)}",
+            )
+
+    # 2. Backward compatibility fallback for legacy items in database
+    if file_bytes is None and item.encrypted_content:
+        raw = item.encrypted_content
+        if raw.startswith("{"):
+            try:
+                parsed = json.loads(raw)
+                cipher = parsed.get("ciphertext")
+                if cipher:
+                    file_bytes = base64.b64decode(cipher)
+                    if not item.encryption_iv and parsed.get("iv"):
+                        item.encryption_iv = parsed.get("iv")
+            except Exception:
+                pass
+        if file_bytes is None:
+            file_bytes = raw.encode("utf-8")
+
+    if file_bytes is None:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail="No encrypted file content found for this vault item",
+        )
+
+    filename = item.original_filename or item.title or "encrypted_file.bin"
+    iv_header = item.encryption_iv or ""
+
+    try:
+        await record_audit_log(
+            session=db,
+            user_id=current_user.id,
+            event_type="VAULT",
+            action="DOCUMENT_DOWNLOADED_FROM_S3",
+            description=f"Encrypted document retrieved: {item.title}",
+            ip_address=get_client_ip(request),
+            user_agent=request.headers.get("user-agent"),
+        )
+        await db.commit()
+    except Exception:
+        pass
+
+    return Response(
+        content=file_bytes,
+        media_type="application/octet-stream",
+        headers={
+            "X-Encryption-IV": iv_header,
+            "X-Original-Filename": filename,
+            "Content-Disposition": f'attachment; filename="{filename}"',
+            "Access-Control-Expose-Headers": "X-Encryption-IV, X-Original-Filename, Content-Disposition",
+        },
+    )
+
+
+@router.put(
+    "/items/{item_id}/file",
+    response_model=VaultItemResponse,
+    summary="Upload encrypted document binary to S3 (legacy/unscoped path)",
+)
+async def upload_item_file_unscoped(
+    item_id: uuid.UUID,
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _handle_file_upload(item_id, request, current_user, db, file)
+
+
+@router.get(
+    "/items/{item_id}/file",
+    summary="Download encrypted document binary from S3 (legacy/unscoped path)",
+)
+async def download_item_file_unscoped(
+    item_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _handle_file_download(item_id, request, current_user, db)
+
+
+@router.put(
+    "/{vault_id:uuid}/items/{item_id:uuid}/file",
+    response_model=VaultItemResponse,
+    summary="Upload encrypted document binary to S3 (vault-scoped path)",
+)
+async def upload_item_file_scoped(
+    vault_id: uuid.UUID,
+    item_id: uuid.UUID,
+    request: Request,
+    file: Optional[UploadFile] = File(None),
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _handle_file_upload(item_id, request, current_user, db, file)
+
+
+@router.get(
+    "/{vault_id:uuid}/items/{item_id:uuid}/file",
+    summary="Download encrypted document binary from S3 (vault-scoped path)",
+)
+async def download_item_file_scoped(
+    vault_id: uuid.UUID,
+    item_id: uuid.UUID,
+    request: Request,
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    return await _handle_file_download(item_id, request, current_user, db)

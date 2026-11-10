@@ -35,6 +35,8 @@ import {
   decryptVaultData,
   encryptBinaryData,
   decryptBinaryData,
+  base64ToBuffer,
+  bufferToBase64,
   type EncryptedDataPayload,
 } from '../../utils/crypto';
 import toast from 'react-hot-toast';
@@ -355,15 +357,15 @@ export const VaultPage: React.FC = () => {
 
       // 2. Encrypt binary file in browser with AES-256-GCM
       const encryptedFilePayload = await encryptBinaryData(arrayBuffer, vaultKey);
-      setUploadProgress(70);
+      setUploadProgress(60);
 
       // 3. Encrypt original filename
       const encryptedTitlePayload = await encryptVaultData(uploadedFile.name, vaultKey);
-      setUploadProgress(85);
+      setUploadProgress(75);
 
       const recipient = (contacts ?? []).find((c) => c.id === fileRecipientId);
 
-      // 4. Send encrypted payload to backend
+      // 4. Send encrypted payload metadata to backend
       const newItem = await vaultService.createItem(
         {
           title: uploadedFile.name,
@@ -375,21 +377,38 @@ export const VaultPage: React.FC = () => {
           recipientId: recipient ? recipient.id : null,
           recipientName: recipient ? recipient.name : null,
           verificationStatus: recipient ? recipient.status : 'unassigned',
-          noteContent: JSON.stringify(encryptedFilePayload),
         },
         {
           encryptedTitle: JSON.stringify(encryptedTitlePayload),
-          encryptedContent: JSON.stringify(encryptedFilePayload),
           encryptionIv: encryptedFilePayload.iv,
           mimeType: uploadedFile.type || 'application/octet-stream',
           fileSize: uploadedFile.size,
         }
       );
 
+      // 5. Upload encrypted binary bytes to S3 via PUT /vault/items/{id}/file
+      setUploadProgress(85);
+      const encryptedBytes = base64ToBuffer(encryptedFilePayload.ciphertext);
+      let finalItem = newItem;
+      try {
+        finalItem = await vaultService.uploadFile(newItem.id, encryptedBytes, {
+          originalFilename: uploadedFile.name,
+          mimeType: uploadedFile.type || 'application/octet-stream',
+        });
+      } catch (uploadErr: any) {
+        // If file upload fails after metadata creation, attempt cleanup
+        try {
+          await vaultService.deleteItem(newItem.id);
+        } catch {
+          // ignore cleanup failure
+        }
+        throw new Error(`Failed to upload encrypted file to S3: ${uploadErr.message || uploadErr}`);
+      }
+
       setUploadProgress(100);
 
-      setDecryptedTitles((prev) => ({ ...prev, [newItem.id]: uploadedFile.name }));
-      setItems([newItem, ...(items ?? [])]);
+      setDecryptedTitles((prev) => ({ ...prev, [finalItem.id]: uploadedFile.name }));
+      setItems([finalItem, ...(items ?? [])]);
 
       toast.success('Document encrypted (AES-256-GCM) and committed to vault.');
       setTimeout(() => {
@@ -411,26 +430,44 @@ export const VaultPage: React.FC = () => {
       return;
     }
 
-    if (!item.noteContent) {
-      toast.error('No encrypted payload found for this document.');
-      return;
-    }
-
     try {
-      toast.loading('Decrypting file in memory...', { id: 'file-decrypt' });
+      toast.loading('Downloading and decrypting file in memory...', { id: 'file-decrypt' });
 
-      let payload: EncryptedDataPayload;
-      if (item.noteContent.startsWith('{')) {
-        payload = JSON.parse(item.noteContent);
-      } else {
-        throw new Error('Encrypted payload missing or unformatted.');
+      let decryptedBuffer: ArrayBuffer;
+      let filename = decryptedTitles[item.id] || item.originalFilename || item.title || 'document';
+
+      // 1. Try S3 endpoint first
+      try {
+        const fileResult = await vaultService.downloadFile(item.id);
+        const iv = fileResult.iv || '';
+        if (!iv) {
+          throw new Error('Encryption IV not provided in file metadata.');
+        }
+        // fileResult.data is raw ciphertext bytes from S3
+        const payload: EncryptedDataPayload = {
+          ciphertext: bufferToBase64(fileResult.data),
+          iv: iv,
+        };
+        decryptedBuffer = await decryptBinaryData(payload, vaultKey);
+        if (fileResult.originalFilename) {
+          filename = decryptedTitles[item.id] || fileResult.originalFilename;
+        }
+      } catch (s3Err: any) {
+        // 2. Fallback to legacy noteContent / DB encrypted_content if available
+        if (item.noteContent) {
+          let payload: EncryptedDataPayload;
+          if (item.noteContent.startsWith('{')) {
+            payload = JSON.parse(item.noteContent);
+          } else {
+            throw new Error('Encrypted payload missing or unformatted.');
+          }
+          decryptedBuffer = await decryptBinaryData(payload, vaultKey);
+        } else {
+          throw s3Err;
+        }
       }
 
-      // Decrypt ArrayBuffer
-      const decryptedBuffer = await decryptBinaryData(payload, vaultKey);
-
       // Trigger browser download
-      const filename = decryptedTitles[item.id] || item.originalFilename || item.title || 'document';
       const blob = new Blob([decryptedBuffer]);
       const url = URL.createObjectURL(blob);
       const a = document.createElement('a');

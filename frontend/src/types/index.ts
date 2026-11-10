@@ -12,6 +12,7 @@ export interface VaultItem {
   originalFilename?: string;
   fileSizeBytes?: number;
   noteContent?: string;
+  s3Key?: string | null;
   isMonospace?: boolean;
   releaseAuthorized: boolean;
   recipientId: string | null;

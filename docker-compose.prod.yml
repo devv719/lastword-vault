@@ -1,0 +1,108 @@
+# ==============================================================================
+# LastWord — Production HTTPS Docker Compose Stack with Caddy & Let's Encrypt
+# ==============================================================================
+#
+# Production usage:
+#   1. Set DOMAIN in .env (e.g. DOMAIN=3.109.2.254.sslip.io or your custom domain)
+#   2. Run: docker compose -f docker-compose.prod.yml up -d --build
+#
+# Security:
+#   - Database and FastAPI backend are NOT exposed publicly (localhost only).
+#   - Automatic TLS certificate acquisition and renewal via Let's Encrypt.
+#   - Automatic HTTP (80) -> HTTPS (443) redirect.
+#   - Preserves existing database volume (pgdata).
+# ==============================================================================
+
+version: "3.9"
+
+services:
+  # ── PostgreSQL Database ─────────────────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: lastword-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lastword}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-lastword}
+    # Bound to loopback interface only — never exposed publicly
+    ports:
+      - "127.0.0.1:${POSTGRES_PORT:-5432}:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - lastword-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lastword}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── FastAPI Backend ─────────────────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.prod
+    container_name: lastword-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-lastword}:${POSTGRES_PASSWORD:-changeme_local_only}@db:5432/${POSTGRES_DB:-lastword}
+      APP_ENV: production
+    # Loopback binding only for internal diagnostics — not exposed publicly
+    ports:
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    networks:
+      - lastword-net
+
+  # ── React Frontend (Nginx Internal) ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: lastword-frontend
+    restart: unless-stopped
+    # No direct host ports — accessed via Caddy reverse proxy
+    expose:
+      - "80"
+    depends_on:
+      - backend
+    networks:
+      - lastword-net
+
+  # ── Caddy Reverse Proxy & Automatic HTTPS ───────────────────────────────────
+  caddy:
+    image: caddy:2-alpine
+    container_name: lastword-caddy
+    restart: unless-stopped
+    ports:
+      - "80:80"
+      - "443:443"
+    environment:
+      DOMAIN: ${DOMAIN:-:80}
+    volumes:
+      - ./infra/caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - caddy_data:/data
+      - caddy_config:/config
+    depends_on:
+      - frontend
+      - backend
+    networks:
+      - lastword-net
+
+volumes:
+  pgdata:
+    driver: local
+  caddy_data:
+    driver: local
+  caddy_config:
+    driver: local
+
+networks:
+  lastword-net:
+    driver: bridge
+

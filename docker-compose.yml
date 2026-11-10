@@ -44,8 +44,9 @@ services:
     environment:
       # Override DATABASE_URL to use Docker network hostname
       DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-lastword}:${POSTGRES_PASSWORD:-changeme_local_only}@db:5432/${POSTGRES_DB:-lastword}
+    # Bound to localhost only — not exposed to public/external network interfaces
     ports:
-      - "${BACKEND_PORT:-8000}:8000"
+      - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
     depends_on:
       db:
         condition: service_healthy
