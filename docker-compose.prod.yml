@@ -53,6 +53,8 @@ services:
     # Loopback binding only for internal diagnostics — not exposed publicly
     ports:
       - "127.0.0.1:${BACKEND_PORT:-8000}:8000"
+    volumes:
+      - /var/log/lastword:/var/log/lastword
     depends_on:
       db:
         condition: service_healthy

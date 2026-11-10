@@ -24,6 +24,7 @@ from app.schemas.checkin import (
 from app.services.audit_service import record_audit_log
 from app.services.email_service import (
     EmailDeliveryError,
+    get_ses_delivery_diagnostics,
     send_checkin_reminder_email,
     send_missed_checkin_warning_email,
     send_test_email,
@@ -433,6 +434,21 @@ async def evaluate_switch(
     )
 
 
+@router.get(
+    "/ses-diagnostics",
+    summary="Comprehensive delivery and configuration diagnostics for Amazon SES",
+)
+async def ses_diagnostics_endpoint(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    diagnostics = get_ses_delivery_diagnostics(recipient_email=current_user.email)
+    return {
+        "success": True,
+        "diagnostics": diagnostics,
+    }
+
+
 @router.post(
     "/test-email",
     summary="Diagnostic endpoint to test Amazon SES email delivery",
@@ -449,6 +465,13 @@ async def test_email_endpoint(
             "success": True,
             "message": f"Diagnostic test email successfully accepted and queued by Amazon SES to {target_email}.",
             "details": result,
+            "diagnostics": {
+                "gmail_delivery_note": (
+                    "If the email does not appear in your Gmail inbox, check the Gmail Spam folder. "
+                    "Google anti-spoofing policy marks emails sent with From: @gmail.com via Amazon SES as Spam."
+                ),
+                "in_ses_sandbox": True,
+            },
         }
     except EmailDeliveryError as exc:
         raise HTTPException(

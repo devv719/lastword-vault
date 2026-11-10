@@ -1,0 +1,51 @@
+{
+  "agent": {
+    "metrics_collection_interval": 60,
+    "run_as_user": "root"
+  },
+  "metrics": {
+    "namespace": "LastWord/EC2",
+    "append_dimensions": {
+      "InstanceId": "${aws:InstanceId}"
+    },
+    "metrics_collected": {
+      "mem": {
+        "measurement": [
+          "mem_used_percent"
+        ],
+        "metrics_collection_interval": 60
+      },
+      "disk": {
+        "measurement": [
+          "disk_used_percent"
+        ],
+        "metrics_collection_interval": 60,
+        "resources": [
+          "/"
+        ]
+      }
+    }
+  },
+  "logs": {
+    "logs_collected": {
+      "files": {
+        "collect_list": [
+          {
+            "file_path": "/var/log/lastword/backend.log",
+            "log_group_name": "/lastword/backend",
+            "log_stream_name": "{instance_id}-backend",
+            "retention_in_days": 7,
+            "timezone": "UTC"
+          },
+          {
+            "file_path": "/var/log/lastword/error.log",
+            "log_group_name": "/lastword/errors",
+            "log_stream_name": "{instance_id}-error",
+            "retention_in_days": 7,
+            "timezone": "UTC"
+          }
+        ]
+      }
+    }
+  }
+}

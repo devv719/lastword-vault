@@ -5,11 +5,65 @@
       "Sid": "S3VaultAccess",
       "Effect": "Allow",
       "Action": [
+        "s3:ListBucket",
         "s3:PutObject",
         "s3:GetObject",
         "s3:DeleteObject"
       ],
-      "Resource": "arn:aws:s3:::lastword-vault-*/*"
+      "Resource": [
+        "arn:aws:s3:::lastword-vault-*",
+        "arn:aws:s3:::lastword-vault-*/*"
+      ]
+    },
+    {
+      "Sid": "SNSTopicPublish",
+      "Effect": "Allow",
+      "Action": [
+        "sns:Publish"
+      ],
+      "Resource": "arn:aws:sns:ap-south-1:*:lastword-notifications"
+    },
+    {
+      "Sid": "SESEmailDeliveryAndDiagnostics",
+      "Effect": "Allow",
+      "Action": [
+        "ses:SendEmail",
+        "ses:SendRawEmail",
+        "ses:GetSendQuota",
+        "ses:GetIdentityVerificationAttributes",
+        "ses:GetIdentityDkimAttributes",
+        "ses:DescribeConfigurationSet",
+        "ses:GetAccountSendingEnabled",
+        "ses:ListConfigurationSets",
+        "ses:CreateConfigurationSet",
+        "ses:CreateConfigurationSetEventDestination",
+        "ses:UpdateConfigurationSetEventDestination"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchMetricsAndAlarms",
+      "Effect": "Allow",
+      "Action": [
+        "cloudwatch:PutMetricData",
+        "cloudwatch:PutMetricAlarm",
+        "cloudwatch:DescribeAlarms",
+        "cloudwatch:DeleteAlarms"
+      ],
+      "Resource": "*"
+    },
+    {
+      "Sid": "CloudWatchLogsAccess",
+      "Effect": "Allow",
+      "Action": [
+        "logs:CreateLogGroup",
+        "logs:CreateLogStream",
+        "logs:PutLogEvents",
+        "logs:DescribeLogStreams",
+        "logs:DescribeLogGroups",
+        "logs:PutRetentionPolicy"
+      ],
+      "Resource": "arn:aws:logs:*:*:log-group:/lastword/*"
     },
     {
       "Sid": "SSMParameterRead",
@@ -21,15 +75,12 @@
       "Resource": "arn:aws:ssm:*:*:parameter/lastword/*"
     },
     {
-      "Sid": "CloudWatchLogs",
+      "Sid": "EC2InstanceDiscovery",
       "Effect": "Allow",
       "Action": [
-        "logs:CreateLogGroup",
-        "logs:CreateLogStream",
-        "logs:PutLogEvents"
+        "ec2:DescribeInstances"
       ],
-      "Resource": "arn:aws:logs:*:*:log-group:/lastword/*"
+      "Resource": "*"
     }
   ]
 }
-

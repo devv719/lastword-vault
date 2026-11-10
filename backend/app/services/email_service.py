@@ -81,27 +81,46 @@ def send_email(
             "Charset": "UTF-8",
         }
 
-    try:
-        response = client.send_email(
-            Source=sender,
-            Destination={"ToAddresses": [normalized_to]},
-            Message={
-                "Subject": {
-                    "Data": subject,
-                    "Charset": "UTF-8",
-                },
-                "Body": body,
+    send_args: Dict[str, Any] = {
+        "Source": sender,
+        "Destination": {"ToAddresses": [normalized_to]},
+        "Message": {
+            "Subject": {
+                "Data": subject,
+                "Charset": "UTF-8",
             },
-        )
+            "Body": body,
+        },
+        "ReplyToAddresses": [sender],
+    }
+
+    config_set = getattr(settings, "SES_CONFIGURATION_SET", None)
+    if config_set:
+        send_args["ConfigurationSetName"] = config_set
+
+    try:
+        try:
+            response = client.send_email(**send_args)
+        except ClientError as conf_err:
+            if conf_err.response.get("Error", {}).get("Code") == "ConfigurationSetDoesNotExist":
+                logger.warning(
+                    f"SES ConfigurationSet '{config_set}' does not exist. Retrying send without ConfigurationSet."
+                )
+                send_args.pop("ConfigurationSetName", None)
+                response = client.send_email(**send_args)
+            else:
+                raise conf_err
+
         message_id = response.get("MessageId", "unknown")
         logger.info(
-            f"Successfully queued SES email to {normalized_to} (Subject: '{subject}', MessageId: {message_id})"
+            f"Successfully queued SES email to {normalized_to} (Subject: '{subject}', MessageId: {message_id}, ConfigSet: {send_args.get('ConfigurationSetName', 'None')})"
         )
         return {
             "status": "SENT",
             "message_id": message_id,
             "recipient": normalized_to,
             "sender": sender,
+            "configuration_set": send_args.get("ConfigurationSetName"),
         }
 
     except NoCredentialsError as exc:
@@ -491,4 +510,198 @@ def send_test_email(to_email: str) -> Dict[str, Any]:
 </html>"""
 
     return send_email(to_email, subject, text_content, html_content)
+
+
+def get_ses_delivery_diagnostics(recipient_email: Optional[str] = None) -> Dict[str, Any]:
+    """
+    Inspect and return comprehensive Amazon SES configuration, identity status, and delivery diagnostics.
+
+    Analyzes:
+    1. Sending quota and 24-hour delivery limits.
+    2. Account sending enablement.
+    3. Identity verification status for sender and recipient.
+    4. DKIM attributes.
+    5. Configuration set existence and SNS event destinations.
+    6. DMARC / Gmail sender anti-spoofing diagnostics.
+    """
+    settings = get_settings()
+    sender = settings.SES_SENDER_EMAIL or "devvv0793@gmail.com"
+    target_recipient = (recipient_email or sender).strip()
+    region = settings.AWS_REGION or "ap-south-1"
+    config_set = getattr(settings, "SES_CONFIGURATION_SET", "lastword-ses-events")
+
+    diagnostics: Dict[str, Any] = {
+        "region": region,
+        "sender": sender,
+        "target_recipient": target_recipient,
+        "configuration_set": config_set,
+        "checked_at": datetime.utcnow().isoformat() + "Z",
+        "issues_detected": [],
+        "recommendations": [],
+    }
+
+    try:
+        client = get_ses_client()
+    except Exception as exc:
+        diagnostics["issues_detected"].append(f"Failed to initialize SES client: {str(exc)}")
+        return diagnostics
+
+    # 1. Sending quota and account sending status
+    try:
+        quota = client.get_send_quota()
+        diagnostics["quota"] = {
+            "max_24_hour_send": quota.get("Max24HourSend", 0.0),
+            "sent_last_24_hours": quota.get("SentLast24Hours", 0.0),
+            "max_send_rate": quota.get("MaxSendRate", 0.0),
+        }
+    except Exception as exc:
+        diagnostics["quota_error"] = str(exc)
+
+    try:
+        enabled_resp = client.get_account_sending_enabled()
+        diagnostics["account_sending_enabled"] = enabled_resp.get("Enabled", True)
+    except Exception as exc:
+        diagnostics["account_sending_enabled_error"] = str(exc)
+
+    # 2. Identity verification attributes
+    identities_to_check = list(set([sender, target_recipient]))
+    try:
+        ident_resp = client.get_identity_verification_attributes(Identities=identities_to_check)
+        verif_attrs = ident_resp.get("VerificationAttributes", {})
+        ident_status = {}
+        for ident in identities_to_check:
+            status_val = verif_attrs.get(ident, {}).get("VerificationStatus", "NotVerified")
+            ident_status[ident] = status_val
+            if status_val != "Success":
+                diagnostics["issues_detected"].append(
+                    f"Identity '{ident}' status is '{status_val}'. In SES Sandbox, all sender and recipient addresses must be 'Success'."
+                )
+        diagnostics["identity_verification"] = ident_status
+    except Exception as exc:
+        diagnostics["identity_verification_error"] = str(exc)
+
+    # 3. DKIM attributes
+    try:
+        dkim_resp = client.get_identity_dkim_attributes(Identities=[sender])
+        dkim_attrs = dkim_resp.get("DkimAttributes", {}).get(sender, {})
+        diagnostics["sender_dkim"] = {
+            "dkim_enabled": dkim_attrs.get("DkimEnabled", False),
+            "dkim_verification_status": dkim_attrs.get("DkimVerificationStatus", "NotConfigured"),
+        }
+    except Exception as exc:
+        diagnostics["sender_dkim_error"] = str(exc)
+
+    # 4. Configuration Set & Event Destinations
+    if config_set:
+        try:
+            cs_resp = client.describe_configuration_set(
+                ConfigurationSetName=config_set,
+                ConfigurationSetAttributeNames=["eventDestinations"],
+            )
+            event_dests = cs_resp.get("EventDestinations", [])
+            diagnostics["configuration_set_status"] = "EXISTS"
+            diagnostics["event_destinations"] = [
+                {
+                    "name": d.get("Name"),
+                    "enabled": d.get("Enabled"),
+                    "matching_event_types": d.get("MatchingEventTypes"),
+                    "sns_topic_arn": d.get("SNSDestination", {}).get("TopicARN"),
+                }
+                for d in event_dests
+            ]
+        except ClientError as exc:
+            if exc.response.get("Error", {}).get("Code") == "ConfigurationSetDoesNotExist":
+                diagnostics["configuration_set_status"] = "DOES_NOT_EXIST"
+                diagnostics["issues_detected"].append(
+                    f"ConfigurationSet '{config_set}' does not exist on AWS. Create it with event destinations (Send, Bounce, Complaint, Delivery) to monitor email status via SNS."
+                )
+            else:
+                diagnostics["configuration_set_error"] = str(exc)
+        except Exception as exc:
+            diagnostics["configuration_set_error"] = str(exc)
+
+    # 5. DMARC / Domain analysis for Gmail recipient delivery
+    sender_domain = sender.split("@")[-1].lower() if "@" in sender else ""
+    if sender_domain in ("gmail.com", "googlemail.com"):
+        diagnostics["dmarc_anti_spoofing_analysis"] = {
+            "sender_domain": sender_domain,
+            "root_cause_explanation": (
+                "When sending from a '@gmail.com' address through Amazon SES, the sender's domain "
+                "is owned by Google. Amazon SES IP addresses are not part of Google's SPF record "
+                "(_spf.google.com), and Amazon SES cannot DKIM-sign on behalf of gmail.com. "
+                "Google strictly enforces DMARC anti-spoofing policies on inbound messages claiming "
+                "to originate from '@gmail.com'. Consequently, Gmail's inbound mail servers classify "
+                "these emails as unauthenticated and often route them directly to the Spam folder, "
+                "or may reject/quarantine them."
+            ),
+            "actionable_steps": [
+                "Check the recipient's Gmail Spam/Junk folder (in:spam) and mark the message as 'Not Spam'.",
+                "Search Gmail for: from:devvv0793@gmail.com in:anywhere",
+                "Ensure both sender and recipient email addresses are verified identities in AWS SES Console (ap-south-1).",
+                "Link the SES Configuration Set to your existing SNS topic 'lastword-notifications' to receive real-time delivery and bounce events.",
+            ],
+        }
+        diagnostics["recommendations"].append(
+            "Check Gmail Spam folder: Google DMARC policy places emails sent with From: @gmail.com via Amazon SES into Spam."
+        )
+
+    return diagnostics
+
+
+def setup_ses_configuration_set(
+    configuration_set_name: str,
+    sns_topic_arn: str,
+) -> Dict[str, Any]:
+    """Create or ensure SES Configuration Set exists with an SNS Event Destination for email monitoring."""
+    client = get_ses_client()
+    events = ["send", "reject", "bounce", "complaint", "delivery"]
+    dest_name = f"{configuration_set_name}-sns-dest"
+
+    # Check if configuration set exists
+    try:
+        client.describe_configuration_set(ConfigurationSetName=configuration_set_name)
+        logger.info(f"SES ConfigurationSet '{configuration_set_name}' already exists.")
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "ConfigurationSetDoesNotExist":
+            client.create_configuration_set(
+                ConfigurationSet={"Name": configuration_set_name}
+            )
+            logger.info(f"Created SES ConfigurationSet '{configuration_set_name}'.")
+        else:
+            raise exc
+
+    # Create or update event destination
+    try:
+        client.create_configuration_set_event_destination(
+            ConfigurationSetName=configuration_set_name,
+            EventDestination={
+                "Name": dest_name,
+                "Enabled": True,
+                "MatchingEventTypes": events,
+                "SNSDestination": {"TopicARN": sns_topic_arn},
+            },
+        )
+        logger.info(f"Attached SNS event destination '{dest_name}' to ConfigurationSet '{configuration_set_name}'.")
+    except ClientError as exc:
+        if exc.response.get("Error", {}).get("Code") == "EventDestinationAlreadyExists":
+            client.update_configuration_set_event_destination(
+                ConfigurationSetName=configuration_set_name,
+                EventDestination={
+                    "Name": dest_name,
+                    "Enabled": True,
+                    "MatchingEventTypes": events,
+                    "SNSDestination": {"TopicARN": sns_topic_arn},
+                },
+            )
+            logger.info(f"Updated SNS event destination '{dest_name}'.")
+        else:
+            raise exc
+
+    return {
+        "status": "CONFIGURED",
+        "configuration_set_name": configuration_set_name,
+        "event_destination_name": dest_name,
+        "matching_events": events,
+        "sns_topic_arn": sns_topic_arn,
+    }
 

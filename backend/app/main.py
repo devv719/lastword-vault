@@ -4,6 +4,10 @@ from fastapi.responses import JSONResponse
 
 from app.api.v1.router import api_v1_router
 from app.config import get_settings
+from app.core.logging_config import RequestLoggingMiddleware, setup_logging
+
+# Initialize application logging (stdout + CloudWatch log destination)
+setup_logging()
 
 settings = get_settings()
 
@@ -14,6 +18,9 @@ app = FastAPI(
     docs_url="/docs",
     redoc_url="/redoc",
 )
+
+# Attach request logging middleware for CloudWatch diagnostics
+app.add_middleware(RequestLoggingMiddleware)
 
 # Configure CORS
 origins = [origin.strip() for origin in settings.CORS_ORIGINS.split(",") if origin.strip()]

@@ -31,6 +31,13 @@ class Settings(BaseSettings):
     S3_BUCKET_NAME: str = ""
     SNS_TOPIC_ARN: str = ""
     SES_SENDER_EMAIL: str = "devvv0793@gmail.com"
+    SES_CONFIGURATION_SET: str = "lastword-ses-events"
+
+    # cloudwatch configuration
+    CLOUDWATCH_LOG_GROUP: str = "/lastword/backend"
+    CLOUDWATCH_ERROR_LOG_GROUP: str = "/lastword/errors"
+    CLOUDWATCH_RETENTION_DAYS: int = 7
+    CLOUDWATCH_NAMESPACE: str = "LastWord/EC2"
 
     # frontend / public url configuration
     FRONTEND_URL: str = ""

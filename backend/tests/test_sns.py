@@ -260,3 +260,4 @@ async def test_diagnostic_test_sns_endpoint(client: AsyncClient, auth_user: dict
     assert "sns-msg-mock-1234567890" in data["details"]["message_id"]
 
     mock_sns_client.publish.assert_called_once()
+

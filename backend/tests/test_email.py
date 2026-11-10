@@ -353,3 +353,115 @@ async def test_diagnostic_test_email_endpoint(client: AsyncClient, auth_user: di
     assert "ses-msg-mock-987654321" in data["details"]["message_id"]
 
     mock_ses_client.send_email.assert_called_once()
+
+
+def test_send_email_with_configuration_set_and_fallback():
+    """Verify ConfigurationSetName is included in send_email and retries gracefully if missing."""
+    with patch("app.services.email_service.get_ses_client") as mock_get_client:
+        mock_client = MagicMock()
+        error_resp = {"Error": {"Code": "ConfigurationSetDoesNotExist", "Message": "Config set not found"}}
+        # First call fails with ConfigurationSetDoesNotExist, second succeeds
+        mock_client.send_email.side_effect = [
+            ClientError(error_resp, "SendEmail"),
+            {"MessageId": "ses-fallback-12345"},
+        ]
+        mock_get_client.return_value = mock_client
+
+        with patch("app.services.email_service.get_settings") as mock_settings:
+            settings_mock = MagicMock()
+            settings_mock.SES_SENDER_EMAIL = "devvv0793@gmail.com"
+            settings_mock.AWS_REGION = "ap-south-1"
+            settings_mock.SES_CONFIGURATION_SET = "lastword-ses-events"
+            mock_settings.return_value = settings_mock
+
+            res = send_email("devvv0793@gmail.com", "Subject", "Body")
+            assert res["status"] == "SENT"
+            assert res["message_id"] == "ses-fallback-12345"
+            assert mock_client.send_email.call_count == 2
+            second_call_kwargs = mock_client.send_email.call_args_list[1][1]
+            assert "ConfigurationSetName" not in second_call_kwargs
+
+
+def test_get_ses_delivery_diagnostics():
+    """Verify get_ses_delivery_diagnostics queries quota, identities, and explains Gmail DMARC."""
+    from app.services.email_service import get_ses_delivery_diagnostics
+
+    with patch("app.services.email_service.get_ses_client") as mock_get_client:
+        mock_client = MagicMock()
+        mock_client.get_send_quota.return_value = {
+            "Max24HourSend": 200.0,
+            "SentLast24Hours": 5.0,
+            "MaxSendRate": 1.0,
+        }
+        mock_client.get_account_sending_enabled.return_value = {"Enabled": True}
+        mock_client.get_identity_verification_attributes.return_value = {
+            "VerificationAttributes": {
+                "devvv0793@gmail.com": {"VerificationStatus": "Success"},
+            }
+        }
+        mock_client.get_identity_dkim_attributes.return_value = {
+            "DkimAttributes": {
+                "devvv0793@gmail.com": {"DkimEnabled": False, "DkimVerificationStatus": "NotConfigured"}
+            }
+        }
+        mock_client.describe_configuration_set.return_value = {
+            "ConfigurationSet": {"Name": "lastword-ses-events"},
+            "EventDestinations": [
+                {
+                    "Name": "lastword-ses-events-sns",
+                    "Enabled": True,
+                    "MatchingEventTypes": ["send", "reject", "bounce", "complaint", "delivery"],
+                    "SNSDestination": {"TopicARN": "arn:aws:sns:ap-south-1:991467041291:lastword-notifications"},
+                }
+            ],
+        }
+        mock_get_client.return_value = mock_client
+
+        diag = get_ses_delivery_diagnostics(recipient_email="devvv0793@gmail.com")
+        assert diag["region"] == "ap-south-1"
+        assert diag["quota"]["max_24_hour_send"] == 200.0
+        assert diag["identity_verification"]["devvv0793@gmail.com"] == "Success"
+        assert diag["configuration_set_status"] == "EXISTS"
+        assert "dmarc_anti_spoofing_analysis" in diag
+        assert "Spam" in diag["dmarc_anti_spoofing_analysis"]["actionable_steps"][0]
+
+
+@pytest.mark.asyncio
+async def test_ses_diagnostics_endpoint(client: AsyncClient, auth_user: dict):
+    """Verify GET /api/v1/checkin/ses-diagnostics returns diagnostics report."""
+    headers = auth_user["headers"]
+
+    with patch("app.services.email_service.get_ses_delivery_diagnostics") as mock_diag:
+        mock_diag.return_value = {
+            "region": "ap-south-1",
+            "sender": "devvv0793@gmail.com",
+            "target_recipient": "devvv0793@gmail.com",
+            "configuration_set_status": "EXISTS",
+            "recommendations": ["Check Spam folder"],
+        }
+        resp = await client.get("/api/v1/checkin/ses-diagnostics", headers=headers)
+        assert resp.status_code == 200
+        data = resp.json()
+        assert data["success"] is True
+        assert data["diagnostics"]["sender"] == "devvv0793@gmail.com"
+
+
+def test_sensitive_data_logger_scrubber():
+    """Verify SensitiveDataFilter scrubs bearer tokens, passwords, and secrets."""
+    import logging
+    from app.core.logging_config import SensitiveDataFilter
+
+    flt = SensitiveDataFilter()
+    record = logging.LogRecord(
+        name="test",
+        level=logging.INFO,
+        pathname="",
+        lineno=0,
+        msg="User login failed with password: 'my-super-secret-password-123' and bearer eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.token.data",
+        args=(),
+        exc_info=None,
+    )
+    flt.filter(record)
+    assert "my-super-secret-password" not in record.msg
+    assert "[SCRUBBED]" in record.msg
+    assert "[SCRUBBED_TOKEN]" in record.msg
