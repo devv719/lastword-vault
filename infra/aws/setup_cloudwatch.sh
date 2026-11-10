@@ -31,3 +31,4 @@ echo "=== LastWord: Executing CloudWatch Alarms & SES Setup Script ==="
 python3 "$SCRIPT_DIR/setup_cloudwatch.py"
 
 echo "=== Setup Complete ==="
+
