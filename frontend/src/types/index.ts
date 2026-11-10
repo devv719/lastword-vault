@@ -87,3 +87,28 @@ export interface VaultSummary {
 export type AsyncState = 'idle' | 'loading' | 'success' | 'error' | 'empty';
 
 export type DevForcedState = 'loading' | 'empty' | 'error' | null;
+
+export interface AuthUser {
+  id: string;
+  email: string;
+  display_name: string;
+  status: 'ACTIVE' | 'WARNED' | 'GRACE' | 'RELEASED';
+  checkin_interval_hours: number;
+  grace_period_hours: number;
+  last_checkin_at?: string | null;
+  next_deadline?: string | null;
+  warned_at?: string | null;
+  grace_expires_at?: string | null;
+  demo_mode: boolean;
+  pending_email?: string | null;
+  created_at: string;
+  updated_at: string;
+}
+
+export interface TokenResponse {
+  access_token: string;
+  token_type: string;
+  expires_in: number;
+  user: AuthUser;
+}
+

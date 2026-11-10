@@ -1,11 +1,14 @@
 import React, { useState } from 'react';
-import { Link } from 'react-router-dom';
+import { Link, useNavigate, useLocation } from 'react-router-dom';
 import { useForm } from 'react-hook-form';
 import { zodResolver } from '@hookform/resolvers/zod';
 import { z } from 'zod';
 import { AlertCircle } from 'lucide-react';
+import axios from 'axios';
+import toast from 'react-hot-toast';
 import { Input, PasswordInput } from '../../components/ui/Input';
 import { PillButton } from '../../components/ui/PillButton';
+import { useAuth } from '../../context/AuthContext';
 
 const loginSchema = z.object({
   email: z.string().min(1, 'Email is required').email('Enter a valid email address'),
@@ -17,6 +20,9 @@ type LoginFormData = z.infer<typeof loginSchema>;
 export const LoginPage: React.FC = () => {
   const [authError, setAuthError] = useState<string | null>(null);
   const [isSubmitting, setIsSubmitting] = useState(false);
+  const { login } = useAuth();
+  const navigate = useNavigate();
+  const location = useLocation();
 
   const {
     register,
@@ -27,18 +33,37 @@ export const LoginPage: React.FC = () => {
     mode: 'onBlur',
   });
 
-  const onSubmit = async (_data: LoginFormData) => {
+  const onSubmit = async (data: LoginFormData) => {
     setIsSubmitting(true);
     setAuthError(null);
 
-    // Simulate network attempt
-    await new Promise((resolve) => setTimeout(resolve, 800));
-    setIsSubmitting(false);
+    try {
+      await login({
+        email: data.email,
+        password: data.password,
+      });
 
-    // Explicit requirement: Submitting must NOT fake a successful login.
-    setAuthError(
-      "Authentication isn't connected yet. Use the preview link below to explore the console interface."
-    );
+      toast.success('Welcome back! Vault unlocked.');
+      const from = (location.state as { from?: { pathname?: string } })?.from?.pathname || '/app';
+      navigate(from, { replace: true });
+    } catch (err: unknown) {
+      if (axios.isAxiosError(err)) {
+        const detail = err.response?.data?.detail;
+        if (detail) {
+          setAuthError(typeof detail === 'string' ? detail : JSON.stringify(detail));
+        } else if (err.code === 'ERR_NETWORK') {
+          setAuthError('Unable to connect to the backend server. Please verify the API is running.');
+        } else {
+          setAuthError(err.message || 'Authentication failed. Please check your credentials.');
+        }
+      } else if (err instanceof Error) {
+        setAuthError(err.message);
+      } else {
+        setAuthError('An unexpected authentication error occurred.');
+      }
+    } finally {
+      setIsSubmitting(false);
+    }
   };
 
   return (
@@ -56,11 +81,11 @@ export const LoginPage: React.FC = () => {
         <div
           role="alert"
           aria-live="polite"
-          className="p-4 rounded-2xl bg-warning-soft border border-warning/30 flex items-start gap-3"
+          className="p-4 rounded-2xl bg-danger-soft border border-danger/30 flex items-start gap-3"
         >
-          <AlertCircle className="w-4 h-4 text-warning shrink-0 mt-0.5" />
+          <AlertCircle className="w-4 h-4 text-danger shrink-0 mt-0.5" />
           <div className="space-y-1">
-            <p className="text-xs font-semibold text-warning">Backend Unlinked</p>
+            <p className="text-xs font-semibold text-danger">Authentication Error</p>
             <p className="text-xs text-navy/80 leading-relaxed">{authError}</p>
           </div>
         </div>

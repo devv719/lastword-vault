@@ -23,7 +23,14 @@ def get_engine() -> AsyncEngine:
         from app.core.config import get_settings
 
         settings = get_settings()
-        _engine = create_async_engine(settings.DATABASE_URL, echo=False)
+        connect_args = {}
+        if settings.DATABASE_URL.startswith("sqlite"):
+            connect_args = {"check_same_thread": False}
+        _engine = create_async_engine(
+            settings.DATABASE_URL,
+            echo=False,
+            connect_args=connect_args,
+        )
     return _engine
 
 
@@ -38,6 +45,18 @@ def get_session_maker() -> async_sessionmaker[AsyncSession]:
     return _async_session_maker
 
 
+def reset_database_connection(new_url: Optional[str] = None) -> None:
+    """Reset cached engine and session maker (useful for testing)."""
+    global _engine, _async_session_maker
+    _engine = None
+    _async_session_maker = None
+    if new_url is not None:
+        from app.core.config import get_settings
+
+        settings = get_settings()
+        settings.DATABASE_URL = new_url
+
+
 async def get_db() -> AsyncGenerator[AsyncSession, None]:
     session_maker = get_session_maker()
     async with session_maker() as session:
@@ -47,4 +66,3 @@ async def get_db() -> AsyncGenerator[AsyncSession, None]:
         except Exception:
             await session.rollback()
             raise
-

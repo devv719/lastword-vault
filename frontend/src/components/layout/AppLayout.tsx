@@ -17,6 +17,7 @@ import { LastWordMark } from '../ui/LastWordMark';
 import { VaultStatusChip } from '../ui/Badge';
 import { vaultService } from '../../services/vaultService';
 import type { CheckInSettings, VaultSummary } from '../../types';
+import { useAuth } from '../../context/AuthContext';
 import toast from 'react-hot-toast';
 
 interface NavItem {
@@ -35,10 +36,20 @@ const NAV_ITEMS: NavItem[] = [
 
 export const AppLayout: React.FC = () => {
   const location = useLocation();
+  const { user, logout } = useAuth();
   const [mobileMenuOpen, setMobileMenuOpen] = useState(false);
   const [summary, setSummary] = useState<VaultSummary | null>(null);
   const [settings, setSettings] = useState<CheckInSettings | null>(null);
   const [isCheckingIn, setIsCheckingIn] = useState(false);
+
+  const handleLogout = async () => {
+    try {
+      await logout();
+      toast.success('Signed out successfully');
+    } catch {
+      toast.error('Sign out error');
+    }
+  };
 
   const loadData = async () => {
     try {
@@ -163,21 +174,26 @@ export const AppLayout: React.FC = () => {
           {/* User badge */}
           <div className="pt-3 border-t border-border flex items-center justify-between px-1">
             <div className="flex items-center gap-2.5 min-w-0">
-              <div className="w-8 h-8 rounded-full bg-accent-soft text-accent border border-accent/20 flex items-center justify-center font-medium text-xs shrink-0">
-                JD
+              <div className="w-8 h-8 rounded-full bg-accent-soft text-accent border border-accent/20 flex items-center justify-center font-medium text-xs shrink-0 uppercase">
+                {user?.display_name ? user.display_name.slice(0, 2) : 'LW'}
               </div>
               <div className="min-w-0">
-                <p className="text-xs font-semibold text-navy truncate tracking-tight">John Doe</p>
-                <p className="text-[10px] text-muted-text truncate font-mono">Enclave #018</p>
+                <p className="text-xs font-semibold text-navy truncate tracking-tight">
+                  {user?.display_name || 'Enclave Owner'}
+                </p>
+                <p className="text-[10px] text-muted-text truncate font-mono">
+                  {user?.email || 'Authenticated'}
+                </p>
               </div>
             </div>
-            <Link
-              to="/"
-              title="Sign out & view overview"
+            <button
+              type="button"
+              onClick={handleLogout}
+              title="Sign out & revoke session"
               className="p-1.5 rounded-lg text-muted-text hover:text-navy hover:bg-surface-2 transition-colors cursor-pointer"
             >
               <LogOut className="w-4 h-4" />
-            </Link>
+            </button>
           </div>
         </div>
       </aside>
@@ -278,9 +294,21 @@ export const AppLayout: React.FC = () => {
               {/* Drawer Bottom */}
               <div className="pt-6 border-t border-border space-y-4">
                 {summary && <VaultStatusChip status={summary.status} className="w-full justify-center" />}
+                <button
+                  type="button"
+                  onClick={() => {
+                    setMobileMenuOpen(false);
+                    handleLogout();
+                  }}
+                  className="w-full flex items-center justify-center gap-2 text-center text-xs text-danger hover:underline pt-2 cursor-pointer"
+                >
+                  <LogOut className="w-3.5 h-3.5" />
+                  <span>Sign out & lock vault</span>
+                </button>
                 <Link
                   to="/"
-                  className="block text-center text-xs text-muted-text hover:text-navy pt-2"
+                  onClick={() => setMobileMenuOpen(false)}
+                  className="block text-center text-xs text-muted-text hover:text-navy"
                 >
                   Exit to Landing Overview
                 </Link>

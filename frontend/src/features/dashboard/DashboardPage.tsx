@@ -20,9 +20,11 @@ import { ProgressRing } from '../../components/ui/ProgressRing';
 import { Sparkline } from '../../components/ui/Sparkline';
 import { DashboardSkeleton } from '../../components/ui/Skeleton';
 import { ErrorState } from '../../components/ui/ErrorState';
+import { useAuth } from '../../context/AuthContext';
 import toast from 'react-hot-toast';
 
 export const DashboardPage: React.FC = () => {
+  const { user } = useAuth();
   const {
     data: summary,
     isLoading,
@@ -83,10 +85,10 @@ export const DashboardPage: React.FC = () => {
       <div className="flex flex-col sm:flex-row items-start sm:items-center justify-between gap-4">
         <div>
           <span className="text-xs font-mono uppercase tracking-widest text-muted-text">
-            Owner Enclave #018 • Nominal
+            Owner Enclave • Nominal
           </span>
           <h1 className="text-2xl sm:text-3xl font-bold text-navy tracking-tight mt-0.5">
-            Welcome back, John.
+            Welcome back, {user?.display_name || 'Enclave Owner'}.
           </h1>
         </div>
         <div className="flex items-center gap-3">
