@@ -1,0 +1,77 @@
+# ==========================================================================
+# LastWord — Local Development Stack
+# ==========================================================================
+# Usage:
+#   cp .env.example .env      # then edit values
+#   docker compose up -d db   # start only PostgreSQL for local dev
+#   docker compose up --build # start full stack (frontend + backend + db)
+# ==========================================================================
+
+version: "3.9"
+
+services:
+  # ── PostgreSQL Database ────────────────────────────────────────
+  db:
+    image: postgres:16-alpine
+    container_name: lastword-db
+    restart: unless-stopped
+    environment:
+      POSTGRES_USER: ${POSTGRES_USER:-lastword}
+      POSTGRES_PASSWORD: ${POSTGRES_PASSWORD:-changeme_local_only}
+      POSTGRES_DB: ${POSTGRES_DB:-lastword}
+    # Bound to localhost only — not exposed to public/external network interfaces
+    ports:
+      - "127.0.0.1:5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    networks:
+      - lastword-net
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-lastword}"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  # ── FastAPI Backend ────────────────────────────────────────────
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: lastword-backend
+    restart: unless-stopped
+    env_file:
+      - .env
+    environment:
+      # Override DATABASE_URL to use Docker network hostname
+      DATABASE_URL: postgresql+asyncpg://${POSTGRES_USER:-lastword}:${POSTGRES_PASSWORD:-changeme_local_only}@db:5432/${POSTGRES_DB:-lastword}
+    ports:
+      - "${BACKEND_PORT:-8000}:8000"
+    depends_on:
+      db:
+        condition: service_healthy
+    volumes:
+      - ./backend/app:/app/app  # Hot-reload in development
+    networks:
+      - lastword-net
+
+  # ── React Frontend (Nginx) ────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: lastword-frontend
+    restart: unless-stopped
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    networks:
+      - lastword-net
+
+volumes:
+  pgdata:
+    driver: local
+
+networks:
+  lastword-net:
+    driver: bridge

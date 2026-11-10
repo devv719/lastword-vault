@@ -1,0 +1,14 @@
+{
+  "Name": "lastword-checkin-monitor",
+  "Description": "Fires the LastWord Lambda to evaluate check-in deadlines",
+  "ScheduleExpression": "rate(5 minutes)",
+  "State": "ENABLED",
+  "Targets": [
+    {
+      "Id": "lastword-lambda-target",
+      "Arn": "arn:aws:lambda:REGION:ACCOUNT_ID:function:lastword-scanner",
+      "Input": "{\"source\": \"eventbridge\", \"action\": \"check_deadlines\"}"
+    }
+  ]
+}
+
