@@ -29,6 +29,14 @@ from app.services.email_service import (
     send_test_email,
     send_vault_release_notification_email,
 )
+from app.services.sns_service import (
+    SNSDeliveryError,
+    notify_checkin_reminder,
+    notify_grace_period_warning,
+    notify_missed_checkin,
+    notify_switch_activation,
+    publish_test_notification,
+)
 
 router = APIRouter(prefix="/checkin", tags=["Check-in"])
 
@@ -171,6 +179,18 @@ async def send_reminder(
             detail=f"Failed to dispatch check-in reminder via Amazon SES: {exc.message}",
         )
 
+    # Publish Check-In Reminder event to Amazon SNS topic
+    sns_result = None
+    try:
+        sns_result = notify_checkin_reminder(
+            user_id=str(current_user.id),
+            user_name=current_user.display_name or "Enclave Owner",
+            deadline=deadline,
+            hours_remaining=hours_remaining,
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to publish check-in reminder event to SNS: {exc}")
+
     await record_audit_log(
         session=db,
         user_id=current_user.id,
@@ -187,6 +207,7 @@ async def send_reminder(
         "deadline": deadline,
         "hours_remaining": round(hours_remaining, 1),
         "ses_details": result,
+        "sns_details": sns_result,
     }
 
 
@@ -250,6 +271,29 @@ async def evaluate_switch(
         except EmailDeliveryError as exc:
             notifications.append({"type": "MISSED_CHECKIN_WARNING", "recipient": current_user.email, "error": exc.message})
 
+        # Publish Missed Check-In and Grace Period Warning events to Amazon SNS
+        try:
+            sns_res = notify_missed_checkin(
+                user_id=str(current_user.id),
+                user_name=current_user.display_name or "Enclave Owner",
+                missed_at=current_user.next_deadline,
+                grace_expires_at=current_user.grace_expires_at,
+            )
+            notifications.append({"type": "SNS_MISSED_CHECKIN", "result": sns_res})
+        except Exception as exc:
+            notifications.append({"type": "SNS_MISSED_CHECKIN", "error": str(exc)})
+
+        try:
+            sns_grace_res = notify_grace_period_warning(
+                user_id=str(current_user.id),
+                user_name=current_user.display_name or "Enclave Owner",
+                grace_expires_at=current_user.grace_expires_at,
+                seconds_remaining=(current_user.grace_expires_at - now).total_seconds(),
+            )
+            notifications.append({"type": "SNS_GRACE_PERIOD_WARNING", "result": sns_grace_res})
+        except Exception as exc:
+            notifications.append({"type": "SNS_GRACE_PERIOD_WARNING", "error": str(exc)})
+
         await record_audit_log(
             session=db,
             user_id=current_user.id,
@@ -260,7 +304,22 @@ async def evaluate_switch(
             user_agent=request.headers.get("user-agent"),
         )
 
-    # 2. Check if grace period expired while in WARNED status
+    # 2. Check if grace period is currently running while in WARNED status
+    elif current_user.status == UserStatus.WARNED and current_user.grace_expires_at and now < current_user.grace_expires_at:
+        action_taken = "GRACE_PERIOD_ACTIVE"
+        remaining_secs = (current_user.grace_expires_at - now).total_seconds()
+        try:
+            sns_grace_res = notify_grace_period_warning(
+                user_id=str(current_user.id),
+                user_name=current_user.display_name or "Enclave Owner",
+                grace_expires_at=current_user.grace_expires_at,
+                seconds_remaining=remaining_secs,
+            )
+            notifications.append({"type": "SNS_GRACE_PERIOD_WARNING", "result": sns_grace_res})
+        except Exception as exc:
+            notifications.append({"type": "SNS_GRACE_PERIOD_WARNING", "error": str(exc)})
+
+    # 3. Check if grace period expired while in WARNED status
     elif current_user.status == UserStatus.WARNED and current_user.grace_expires_at and now >= current_user.grace_expires_at:
         current_user.status = UserStatus.RELEASED
         action_taken = "TRANSITIONED_TO_RELEASED"
@@ -334,6 +393,19 @@ async def evaluate_switch(
                     "error": exc.message,
                 })
 
+        # Publish Dead Man's Switch Activation event to Amazon SNS
+        try:
+            sns_switch_res = notify_switch_activation(
+                user_id=str(current_user.id),
+                user_name=current_user.display_name or "Enclave Owner",
+                released_items_count=len(authorized_items),
+                contacts_notified_count=len([n for n in notifications if n.get("type") == "VAULT_RELEASE_NOTIFICATION"]),
+                reason="GRACE_PERIOD_EXPIRED",
+            )
+            notifications.append({"type": "SNS_SWITCH_ACTIVATION", "result": sns_switch_res})
+        except Exception as exc:
+            notifications.append({"type": "SNS_SWITCH_ACTIVATION", "error": str(exc)})
+
         await record_audit_log(
             session=db,
             user_id=current_user.id,
@@ -382,5 +454,27 @@ async def test_email_endpoint(
         raise HTTPException(
             status_code=status.HTTP_502_BAD_GATEWAY,
             detail=f"Amazon SES test delivery failed: {exc.message}",
+        )
+
+
+@router.post(
+    "/test-sns",
+    summary="Diagnostic endpoint to test Amazon SNS event notification publishing",
+)
+async def test_sns_endpoint(
+    current_user: User = Depends(get_current_user),
+    db: AsyncSession = Depends(get_db),
+):
+    try:
+        result = publish_test_notification()
+        return {
+            "success": True,
+            "message": "Diagnostic test notification published successfully to Amazon SNS topic.",
+            "details": result,
+        }
+    except SNSDeliveryError as exc:
+        raise HTTPException(
+            status_code=status.HTTP_502_BAD_GATEWAY,
+            detail=f"Amazon SNS test publish failed: {exc.message}",
         )
 

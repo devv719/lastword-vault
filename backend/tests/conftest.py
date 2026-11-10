@@ -55,6 +55,22 @@ def mock_ses_by_default(monkeypatch):
     return mock_client
 
 
+@pytest.fixture(autouse=True)
+def mock_sns_by_default(monkeypatch):
+    """Ensure no real Amazon SNS messages or AWS network calls are attempted during automated tests."""
+    mock_client = MagicMock()
+    mock_client.publish.return_value = {
+        "MessageId": "sns-msg-mock-default-12345",
+        "ResponseMetadata": {"HTTPStatusCode": 200},
+    }
+    monkeypatch.setattr("app.services.sns_service.get_sns_client", lambda: mock_client)
+    from app.core.config import get_settings
+    settings = get_settings()
+    if not settings.SNS_TOPIC_ARN:
+        monkeypatch.setattr(settings, "SNS_TOPIC_ARN", "arn:aws:sns:ap-south-1:123456789012:lastword-notifications")
+    return mock_client
+
+
 async def override_get_db() -> AsyncGenerator[AsyncSession, None]:
     """Yield a test database session.
 

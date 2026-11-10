@@ -29,6 +29,10 @@ from app.schemas.vault import (
 )
 from app.services.audit_service import record_audit_log
 from app.services.email_service import EmailDeliveryError, send_vault_release_notification_email
+from app.services.sns_service import (
+    notify_switch_activation,
+    notify_vault_release_authorization,
+)
 from app.services.s3_service import (
     delete_encrypted_file,
     download_encrypted_file,
@@ -325,6 +329,18 @@ async def create_item_in_vault(
     await db.commit()
     await db.refresh(item, attribute_names=["assigned_contact"])
 
+    if item.release_authorized:
+        try:
+            notify_vault_release_authorization(
+                user_id=str(current_user.id),
+                item_id=str(item.id),
+                item_title=item.title,
+                release_authorized=True,
+                category=item.category,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to publish SNS release authorization event: {exc}")
+
     return VaultItemResponse.model_validate(item)
 
 
@@ -480,6 +496,7 @@ async def update_item_in_vault(
         item.original_filename = payload.original_filename
     if payload.file_size_bytes is not None:
         item.file_size_bytes = payload.file_size_bytes
+    auth_changed = payload.release_authorized is not None and payload.release_authorized != item.release_authorized
     if payload.release_authorized is not None:
         item.release_authorized = payload.release_authorized
 
@@ -502,6 +519,18 @@ async def update_item_in_vault(
 
     await db.commit()
     await db.refresh(item, attribute_names=["assigned_contact"])
+
+    if auth_changed:
+        try:
+            notify_vault_release_authorization(
+                user_id=str(current_user.id),
+                item_id=str(item.id),
+                item_title=item.title,
+                release_authorized=item.release_authorized,
+                category=item.category,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to publish SNS release authorization event: {exc}")
 
     return VaultItemResponse.model_validate(item)
 
@@ -634,6 +663,18 @@ async def create_vault_item(
     await db.commit()
     await db.refresh(item, attribute_names=["assigned_contact"])
 
+    if item.release_authorized:
+        try:
+            notify_vault_release_authorization(
+                user_id=str(current_user.id),
+                item_id=str(item.id),
+                item_title=item.title,
+                release_authorized=True,
+                category=item.category,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to publish SNS release authorization event: {exc}")
+
     return VaultItemResponse.model_validate(item)
 
 
@@ -763,6 +804,7 @@ async def update_vault_item(
         item.original_filename = payload.original_filename
     if payload.file_size_bytes is not None:
         item.file_size_bytes = payload.file_size_bytes
+    auth_changed = payload.release_authorized is not None and payload.release_authorized != item.release_authorized
     if payload.release_authorized is not None:
         item.release_authorized = payload.release_authorized
 
@@ -785,6 +827,18 @@ async def update_vault_item(
 
     await db.commit()
     await db.refresh(item, attribute_names=["assigned_contact"])
+
+    if auth_changed:
+        try:
+            notify_vault_release_authorization(
+                user_id=str(current_user.id),
+                item_id=str(item.id),
+                item_title=item.title,
+                release_authorized=item.release_authorized,
+                category=item.category,
+            )
+        except Exception as exc:
+            logger.warning(f"Failed to publish SNS release authorization event: {exc}")
 
     return VaultItemResponse.model_validate(item)
 
@@ -1430,6 +1484,19 @@ async def trigger_vault_release(
                 "error": exc.message,
             })
 
+    # Publish Dead Man's Switch Activation event to Amazon SNS
+    sns_result = None
+    try:
+        sns_result = notify_switch_activation(
+            user_id=str(current_user.id),
+            user_name=current_user.display_name or "Enclave Owner",
+            released_items_count=len(authorized_items),
+            contacts_notified_count=len([n for n in notifications if n.get("status") == "SENT"]),
+            reason="MANUAL_OWNER_TRIGGER",
+        )
+    except Exception as exc:
+        logger.warning(f"Failed to publish SNS switch activation event: {exc}")
+
     await record_audit_log(
         session=db,
         user_id=current_user.id,
@@ -1446,4 +1513,5 @@ async def trigger_vault_release(
         "message": f"Vault release triggered. {len(notifications)} notification(s) processed.",
         "released_items_count": len(authorized_items),
         "dispatched_notifications": notifications,
+        "sns_details": sns_result,
     }

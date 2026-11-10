@@ -491,3 +491,4 @@ def send_test_email(to_email: str) -> Dict[str, Any]:
 </html>"""
 
     return send_email(to_email, subject, text_content, html_content)
+
