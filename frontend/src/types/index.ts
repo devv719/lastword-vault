@@ -1,93 +1,89 @@
-/** User account status in the dead man's switch lifecycle. */
-export type UserStatus = "ACTIVE" | "WARNED" | "GRACE" | "RELEASED";
+export type VaultState = 'active' | 'warning' | 'grace' | 'releasing' | 'released';
 
-/** Core user profile returned by the API. */
-export interface User {
-  id: string;
-  email: string;
-  display_name: string;
-  status: UserStatus;
-  checkin_interval_hours: number;
-  grace_period_hours: number;
-  last_checkin_at: string | null;
-  next_deadline: string | null;
-  demo_mode: boolean;
-  created_at: string;
-}
+export type VaultCategory = 'Financial' | 'Legal' | 'Credentials' | 'Personal' | 'Other';
 
-/** A vault item stored by the user. */
+export type RecipientVerificationStatus = 'verified' | 'pending' | 'unassigned' | 'failed' | 'expired';
+
 export interface VaultItem {
   id: string;
   title: string;
-  encrypted_note: string | null;
-  s3_key: string | null;
-  original_filename: string | null;
-  file_size_bytes: number | null;
-  release_authorized: boolean;
-  recipients: VaultItemRecipient[];
-  created_at: string;
-  updated_at: string;
+  type: 'file' | 'note';
+  category: VaultCategory;
+  originalFilename?: string;
+  fileSizeBytes?: number;
+  noteContent?: string;
+  isMonospace?: boolean;
+  releaseAuthorized: boolean;
+  recipientId: string | null;
+  recipientName: string | null;
+  verificationStatus: RecipientVerificationStatus;
+  updatedAt: string;
+  createdAt: string;
 }
 
-/** A recipient assignment on a vault item. */
-export interface VaultItemRecipient {
-  id: string;
-  vault_item_id: string;
-  contact_id: string;
-  contact_name: string;
-  contact_email: string;
-  downloaded: boolean;
-  released_at: string | null;
-}
+export type ContactStatus = 'verified' | 'pending' | 'failed' | 'expired';
 
-/** A trusted contact. */
 export interface Contact {
   id: string;
   name: string;
   email: string;
-  relationship: string | null;
-  verified: boolean;
-  created_at: string;
+  relationship: string;
+  status: ContactStatus;
+  assignedItemsCount: number;
+  phone?: string;
+  verifiedAt?: string;
+  createdAt: string;
 }
 
-/** An audit log entry. */
-export interface AuditEntry {
+export interface CheckInSettings {
+  intervalMode: 'daily' | 'weekly' | 'custom';
+  customDays: number;
+  gracePeriodDays: number;
+  demoMode: boolean;
+  demoIntervalSeconds: number;
+  demoGraceSeconds: number;
+  notifyEmail: boolean;
+  notifySms: boolean;
+  notifyPush: boolean;
+  reminderHoursBefore: number[];
+}
+
+export type ActivityEventType =
+  | 'checkin'
+  | 'warning'
+  | 'transition'
+  | 'release'
+  | 'item_update'
+  | 'contact_verification';
+
+export interface ActivityEvent {
   id: string;
-  action: string;
-  details: Record<string, unknown> | null;
-  ip_address: string | null;
-  created_at: string;
+  type: ActivityEventType;
+  title: string;
+  description: string;
+  fromState?: VaultState;
+  toState?: VaultState;
+  timestamp: string;
+  ipAddress: string;
+  device: string;
+  method: string;
 }
 
-/** Check-in status returned by the API. */
-export interface CheckInStatus {
-  status: UserStatus;
-  next_deadline: string | null;
-  seconds_remaining: number | null;
-  last_checkin_at: string | null;
+export interface VaultSummary {
+  status: VaultState;
+  nextDeadline: string;
+  secondsRemaining: number;
+  totalSecondsInInterval: number;
+  lastCheckinAt: string;
+  totalItems: number;
+  authorizedItems: number;
+  filesCount: number;
+  notesCount: number;
+  contactsCount: number;
+  verifiedContactsCount: number;
+  assignedPercentage: number;
 }
 
-/** Dashboard summary returned by the API. */
-export interface DashboardData {
-  status: UserStatus;
-  next_deadline: string | null;
-  seconds_remaining: number | null;
-  vault_item_count: number;
-  authorized_item_count: number;
-  contact_count: number;
-  recent_activity: AuditEntry[];
-}
+export type AsyncState = 'idle' | 'loading' | 'success' | 'error' | 'empty';
 
-/** Standard paginated response wrapper. */
-export interface PaginatedResponse<T> {
-  items: T[];
-  total: number;
-  page: number;
-  pages: number;
-}
-
-/** API error response. */
-export interface ApiError {
-  detail: string;
-}
-
+export type DevForcedState = 'loading' | 'empty' | 'error' | null;

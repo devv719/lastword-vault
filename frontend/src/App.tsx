@@ -1,46 +1,70 @@
-import { BrowserRouter, Routes, Route } from "react-router-dom";
-import { Toaster } from "react-hot-toast";
+import { BrowserRouter, Routes, Route } from 'react-router-dom';
+import { Toaster } from 'react-hot-toast';
 
-function HomePage() {
-  return (
-    <div className="min-h-screen bg-gray-950 flex items-center justify-center">
-      <div className="text-center space-y-6">
-        <div className="inline-flex items-center justify-center w-20 h-20 rounded-2xl bg-indigo-600/20 mb-2">
-          <span className="text-4xl">🔐</span>
-        </div>
-        <h1 className="text-5xl font-bold text-white tracking-tight">
-          LastWord
-        </h1>
-        <p className="text-lg text-gray-400 max-w-md mx-auto">
-          Dead Man&apos;s Switch Vault &mdash; your secure document release
-          system.
-        </p>
-        <div className="flex items-center justify-center gap-3 pt-4">
-          <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-emerald-500/10 text-emerald-400 text-sm font-medium ring-1 ring-emerald-500/20">
-            <span className="relative flex h-2 w-2">
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
-              <span className="relative inline-flex rounded-full h-2 w-2 bg-emerald-500"></span>
-            </span>
-            Frontend Online
-          </span>
-        </div>
-      </div>
-    </div>
-  );
-}
+// Layouts
+import { MarketingLayout } from './components/layout/MarketingLayout';
+import { AuthLayout } from './components/layout/AuthLayout';
+import { AppLayout } from './components/layout/AppLayout';
+
+// Pages
+import { LandingPage } from './features/landing/LandingPage';
+import { LoginPage } from './features/auth/LoginPage';
+import { RegisterPage } from './features/auth/RegisterPage';
+import { DashboardPage } from './features/dashboard/DashboardPage';
+import { VaultPage } from './features/vault/VaultPage';
+import { ContactsPage } from './features/contacts/ContactsPage';
+import { SettingsPage } from './features/settings/SettingsPage';
+import { ActivityPage } from './features/activity/ActivityPage';
+import { NotFoundPage } from './pages/NotFoundPage';
 
 export default function App() {
   return (
     <BrowserRouter>
+      {/* Toast Notification Container with light theme styling */}
       <Toaster
-        position="top-right"
+        position="bottom-right"
         toastOptions={{
-          className: "!bg-gray-800 !text-white",
-          duration: 4000,
+          duration: 3500,
+          className:
+            '!bg-white !text-navy !border !border-border !rounded-full !shadow-md !text-xs !font-medium !py-2 !px-4',
+          success: {
+            iconTheme: {
+              primary: '#2F7D5B',
+              secondary: '#FFFFFF',
+            },
+          },
+          error: {
+            iconTheme: {
+              primary: '#B4423A',
+              secondary: '#FFFFFF',
+            },
+          },
         }}
       />
+
       <Routes>
-        <Route path="/" element={<HomePage />} />
+        {/* Marketing site with floating nav & signature footer */}
+        <Route element={<MarketingLayout />}>
+          <Route path="/" element={<LandingPage />} />
+        </Route>
+
+        {/* Authentication split layout */}
+        <Route element={<AuthLayout />}>
+          <Route path="/login" element={<LoginPage />} />
+          <Route path="/register" element={<RegisterPage />} />
+        </Route>
+
+        {/* Protected App Console */}
+        <Route path="/app" element={<AppLayout />}>
+          <Route index element={<DashboardPage />} />
+          <Route path="vault" element={<VaultPage />} />
+          <Route path="contacts" element={<ContactsPage />} />
+          <Route path="settings" element={<SettingsPage />} />
+          <Route path="activity" element={<ActivityPage />} />
+        </Route>
+
+        {/* 404 Catch-all */}
+        <Route path="*" element={<NotFoundPage />} />
       </Routes>
     </BrowserRouter>
   );
